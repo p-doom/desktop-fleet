@@ -5,11 +5,21 @@ description = "Slurm-native, capacity-aware fleet management for verifiers env-s
 readme = "README.md"
 requires-python = "~=3.12.0"
 dependencies = [
+    # The producer of the status file this package routes on. The dependency
+    # runs one way only: `desktop` must not learn what a fleet is, or it stops
+    # being usable against one VM with no scheduler.
+    "desktop",
     "msgpack>=1.0",
     "python-dotenv>=1.2.2",
     "pyzmq>=26.0",
     "tomli-w>=1.2.0",
 ]
+
+[tool.uv.sources]
+# The sibling distribution in this repository. Required, not a convenience:
+# PyPI's `desktop` 0.4.2 is a different package with the same name, so a resolve
+# that reaches the index installs that one instead.
+desktop = { path = "..", editable = true }
 
 [project.scripts]
 desktop-fleet = "desktop_fleet.supervise:main"
