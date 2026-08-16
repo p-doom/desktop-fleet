@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet.spec import (
+from desktop_fleet.spec import (
     FleetRunLayout,
     default_public_host,
     load_runtime_env_file,
@@ -59,7 +59,7 @@ def test_fleet_run_layout_honors_environment_overrides(tmp_path):
         "SCRATCH": str(tmp_path / "scratch"),
         "OSWORLD_FLEET_RUN_ID": "run-a",
         "OSWORLD_RUN_BASE": str(tmp_path / "base"),
-        "OSWORLD_FLEET_RUN_ROOT": str(tmp_path / "custom-env-fleet"),
+        "OSWORLD_FLEET_RUN_ROOT": str(tmp_path / "custom-desktop-fleet"),
         "OSWORLD_DESKTOP_POOL_ROOT": str(tmp_path / "custom-desktop-pool"),
         "OSWORLD_ENV_FLEET_REGISTRY": str(tmp_path / "registry.json"),
     }
@@ -68,7 +68,7 @@ def test_fleet_run_layout_honors_environment_overrides(tmp_path):
 
     assert layout.run_id == "run-a"
     assert layout.run_base == tmp_path / "base"
-    assert layout.run_root == tmp_path / "custom-env-fleet"
+    assert layout.run_root == tmp_path / "custom-desktop-fleet"
     assert layout.pool_root == tmp_path / "custom-desktop-pool"
     assert layout.pool_status_dir == tmp_path / "custom-desktop-pool" / "status"
     assert layout.registry_path == tmp_path / "registry.json"

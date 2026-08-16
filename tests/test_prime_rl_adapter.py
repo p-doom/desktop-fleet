@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet.adapters import prime_rl
-from env_fleet.spec import FleetRunLayout
-from env_fleet.supervise import format_submit_report
+from desktop_fleet.adapters import prime_rl
+from desktop_fleet.spec import FleetRunLayout
+from desktop_fleet.supervise import format_submit_report
 
 
 @pytest.fixture(autouse=True)
@@ -184,11 +184,11 @@ def test_submit_report_prints_prime_rl_next_steps(tmp_path):
     )
 
     assert "Render config and launch the consumer:" in report
-    assert "-m env_fleet.adapters.prime_rl render" in report
+    assert "-m desktop_fleet.adapters.prime_rl render" in report
     assert "prime_rl_fleet.toml" in report
     assert "Readiness:" in report
-    assert "uv run --no-sync python -m env_fleet.supervise status" in report
-    assert "uv run --no-sync python -m env_fleet.readiness" in report
+    assert "uv run --no-sync python -m desktop_fleet.supervise status" in report
+    assert "uv run --no-sync python -m desktop_fleet.readiness" in report
     assert "uv run --no-sync python scripts/prime_rl.py" in report
     assert f"{prime_rl.config_path(layout)} --clean-output-dir" in report
     assert ".venv/bin/rl" not in report

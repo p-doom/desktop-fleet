@@ -1,6 +1,6 @@
 """Slurm as the fleet's scheduler: identity, node addressing, queue queries.
 
-The scarce resource an env-fleet manages is an externally-leased machine, and on
+The scarce resource an desktop-fleet manages is an externally-leased machine, and on
 this cluster machines are leased from Slurm. Everything Slurm-shaped lives here.
 """
 
@@ -10,8 +10,8 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from env_fleet.registry import EnvFleetRegistry
-from env_fleet.spec import parse_node_addr
+from desktop_fleet.registry import EnvFleetRegistry
+from desktop_fleet.spec import parse_node_addr
 
 
 @dataclass(frozen=True)

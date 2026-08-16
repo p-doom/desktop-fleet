@@ -1,5 +1,5 @@
 [project]
-name = "env-fleet"
+name = "desktop-fleet"
 version = "0.1.0"
 description = "Slurm-native, capacity-aware fleet management for verifiers env-servers."
 readme = "README.md"
@@ -12,17 +12,17 @@ dependencies = [
 ]
 
 [project.scripts]
-env-fleet = "env_fleet.supervise:main"
-env-fleet-ready = "env_fleet.readiness:main"
-env-fleet-broker = "env_fleet.broker:main"
-env-fleet-prime-rl = "env_fleet.adapters.prime_rl:main"
+desktop-fleet = "desktop_fleet.supervise:main"
+desktop-fleet-ready = "desktop_fleet.readiness:main"
+desktop-fleet-broker = "desktop_fleet.broker:main"
+desktop-fleet-prime-rl = "desktop_fleet.adapters.prime_rl:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["env_fleet"]
+packages = ["desktop_fleet"]
 
 [dependency-groups]
 dev = [

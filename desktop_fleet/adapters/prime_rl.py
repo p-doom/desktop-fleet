@@ -1,17 +1,17 @@
-"""The only place in env-fleet that knows the word ``prime_rl``.
+"""The only place in desktop-fleet that knows the word ``prime_rl``.
 
-env-fleet manages machines; prime-rl is one possible consumer of those machines.
+desktop-fleet manages machines; prime-rl is one possible consumer of those machines.
 Everything prime-rl-shaped lives here:
 
 * the two consumer paths (``prime_rl_config_path``, ``prime_rl_output_dir``) and
   their ``OSWORLD_PRIME_RL_*`` env names, injected into
-  :class:`~env_fleet.spec.FleetRunLayout` through its opaque ``consumer_paths``
+  :class:`~desktop_fleet.spec.FleetRunLayout` through its opaque ``consumer_paths``
   seam;
 * rendering + validating a prime-rl trainer/orchestrator TOML against a live
   fleet registry (the *verifiers env-server* config rendering is generic and
-  stays in :mod:`env_fleet.spec`);
+  stays in :mod:`desktop_fleet.spec`);
 * the operator's copy-pastable launch block, handed to
-  :func:`env_fleet.supervise.format_submit_report` as a callable.
+  :func:`desktop_fleet.supervise.format_submit_report` as a callable.
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from env_fleet import supervise
-from env_fleet.registry import read_registry
-from env_fleet.spec import (
+from desktop_fleet import supervise
+from desktop_fleet.registry import read_registry
+from desktop_fleet.spec import (
     FleetRunLayout,
     load_runtime_env_file,
     project_root,
@@ -45,7 +45,7 @@ DEFAULT_CONFIG_NAME = "prime_rl_fleet.toml"
 DEFAULT_OUTPUT_NAME = "prime_rl"
 DEFAULT_BASE_CONFIG = Path("configs/prime_rl/multi_node.toml")
 LAUNCHER_SCRIPT = "scripts/prime_rl.py"
-RENDER_MODULE = "env_fleet.adapters.prime_rl"
+RENDER_MODULE = "desktop_fleet.adapters.prime_rl"
 
 
 def prime_rl_dir(env: Mapping[str, str] = os.environ) -> Path:

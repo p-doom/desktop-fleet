@@ -1,6 +1,6 @@
 """Machine specs, run layout, and verifiers env-server config rendering.
 
-env-fleet manages *machines*. This module owns the three things a machine has:
+desktop-fleet manages *machines*. This module owns the three things a machine has:
 an identity (:class:`EnvServerSpec`), a place on disk (:class:`FleetRunLayout`),
 and a rendered ``verifiers`` env-server config. Nothing here knows about
 actions, grammars, or any particular trainer -- trainer-specific paths ride
@@ -24,7 +24,7 @@ from typing import Any, Self
 DEFAULT_DESKTOP_POOL_DIR = "pool"
 
 # ``name=/abs/path[,name=/abs/path]`` -- how a consumer injects its own paths
-# into the layout without env-fleet knowing what they mean.
+# into the layout without desktop-fleet knowing what they mean.
 CONSUMER_PATHS_ENV = "ENV_FLEET_CONSUMER_PATHS"
 
 
@@ -399,7 +399,7 @@ class FleetRunLayout:
         return self.logs_dir / f"node_{node_rank:04d}"
 
 
-# Layout keys env-fleet itself owns, in field order. Anything else found under
+# Layout keys desktop-fleet itself owns, in field order. Anything else found under
 # the registry's ``layout`` metadata is a consumer path and is carried verbatim.
 # Derived from the dataclass so a new layout field cannot silently start being
 # read back as somebody's consumer path.

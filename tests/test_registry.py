@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet.registry import read_registry, upsert_registry
-from env_fleet.spec import FleetRunLayout, make_server_specs
-from env_fleet.supervise import read_registry_for_status, registry_path_for_args
+from desktop_fleet.registry import read_registry, upsert_registry
+from desktop_fleet.spec import FleetRunLayout, make_server_specs
+from desktop_fleet.supervise import read_registry_for_status, registry_path_for_args
 
 
 @pytest.fixture(autouse=True)

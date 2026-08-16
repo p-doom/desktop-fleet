@@ -16,7 +16,7 @@ import time
 import msgpack
 import pytest
 
-from env_fleet.broker import (
+from desktop_fleet.broker import (
     NO_BACKEND_CAPACITY_TIMEOUT_ERROR,
     NO_HEALTHY_BACKENDS_ERROR,
     PENDING_QUEUE_FULL_ERROR,
@@ -29,8 +29,8 @@ from env_fleet.broker import (
     gateway_backend_status_dirs,
     gateway_bind_address,
 )
-from env_fleet.spec import make_server_specs
-from env_fleet.supervise import BROKER_MODULE, broker_command
+from desktop_fleet.spec import make_server_specs
+from desktop_fleet.supervise import BROKER_MODULE, broker_command
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +44,7 @@ def test_supervisor_spawns_the_in_package_broker_entrypoint():
         "-m",
         BROKER_MODULE,
     ]
-    assert BROKER_MODULE == "env_fleet.broker"
+    assert BROKER_MODULE == "desktop_fleet.broker"
 
 
 def test_broker_resolves_cross_node_backends_from_registry_gateway_metadata(tmp_path):
@@ -119,7 +119,7 @@ def run(coro):
 # status dir would report capacity_ready unconditionally). Tests that don't care
 # about a given backend's capacity point it at a directory that never exists;
 # read_statuses() treats a missing directory as "no status files".
-UNUSED_STATUS_DIR = "/nonexistent/env-fleet-test-status-dir"
+UNUSED_STATUS_DIR = "/nonexistent/desktop-fleet-test-status-dir"
 
 
 def gateway_with_fake_sockets(

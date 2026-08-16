@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet import slurm
-from env_fleet.slurm import (
+from desktop_fleet import slurm
+from desktop_fleet.slurm import (
     SlurmJob,
     confirm_cancel,
     parse_squeue,

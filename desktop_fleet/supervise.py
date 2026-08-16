@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
-from env_fleet.readiness import (
+from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
     read_statuses,
@@ -37,13 +37,13 @@ from env_fleet.readiness import (
     stale_worker_statuses,
     sum_int_field,
 )
-from env_fleet.registry import (
+from desktop_fleet.registry import (
     EnvFleetRegistry,
     read_registry,
     read_registry_if_ready,
     upsert_registry,
 )
-from env_fleet.slurm import (
+from desktop_fleet.slurm import (
     SlurmJob,
     confirm_cancel,
     query_squeue,
@@ -52,7 +52,7 @@ from env_fleet.slurm import (
     slurm_metadata,
     slurm_node_addrs,
 )
-from env_fleet.spec import (
+from desktop_fleet.spec import (
     FleetRunLayout,
     default_public_host,
     env_path,
@@ -68,9 +68,9 @@ from env_fleet.spec import (
 DEFAULT_FLEET_SCRIPT = Path("sbatch/run_osworld_env_fleet.sbatch")
 DEFAULT_JOB_NAME = "osworld_env_fleet"
 UV_PYTHON_COMMAND = ("uv", "run", "--no-sync", "python")
-FLEET_MODULE = "env_fleet.supervise"
-READINESS_MODULE = "env_fleet.readiness"
-BROKER_MODULE = "env_fleet.broker"
+FLEET_MODULE = "desktop_fleet.supervise"
+READINESS_MODULE = "desktop_fleet.readiness"
+BROKER_MODULE = "desktop_fleet.broker"
 
 LOG_LEVELS = {
     "DEBUG": logging.DEBUG,

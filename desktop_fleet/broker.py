@@ -33,14 +33,14 @@ import msgpack
 import zmq
 import zmq.asyncio
 
-from env_fleet.readiness import (
+from desktop_fleet.readiness import (
     active_worker_statuses,
     read_statuses,
     stale_worker_statuses,
     sum_int_field,
 )
-from env_fleet.registry import read_registry
-from env_fleet.spec import EnvServerSpec, FleetRunLayout, load_runtime_env_file
+from desktop_fleet.registry import read_registry
+from desktop_fleet.spec import EnvServerSpec, FleetRunLayout, load_runtime_env_file
 
 HEALTH_REQUEST_ID = b"health"
 HEALTH_METHOD = b"health"

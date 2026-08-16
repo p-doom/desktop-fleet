@@ -10,10 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet.registry import upsert_registry
-from env_fleet.slurm import SlurmJob
-from env_fleet.spec import FleetRunLayout, make_server_specs, project_root, scratch_root
-from env_fleet.supervise import (
+from desktop_fleet.registry import upsert_registry
+from desktop_fleet.slurm import SlurmJob
+from desktop_fleet.spec import (
+    FleetRunLayout,
+    make_server_specs,
+    project_root,
+    scratch_root,
+)
+from desktop_fleet.supervise import (
     FleetSupervisor,
     PoolHealth,
     ReplicaRuntime,
@@ -97,7 +102,7 @@ def test_prepare_harness_config_includes_desktop_pool(tmp_path):
 
 
 def test_prepare_uses_runtime_paths(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "argv", ["env-fleet", "prepare"])
+    monkeypatch.setattr(sys, "argv", ["desktop-fleet", "prepare"])
     monkeypatch.setenv("PROJECT", str(tmp_path / "project"))
     monkeypatch.setenv("SCRATCH", str(tmp_path / "scratch"))
     monkeypatch.setenv("USER", "lossin1")
@@ -121,7 +126,7 @@ def test_prepare_uses_runtime_paths(monkeypatch, tmp_path):
 
 
 def test_prepare_run_id_override_moves_every_sub_path(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "argv", ["env-fleet", "prepare"])
+    monkeypatch.setattr(sys, "argv", ["desktop-fleet", "prepare"])
     monkeypatch.setenv("OSWORLD_RUN_BASE", str(tmp_path))
     monkeypatch.setenv("OSWORLD_FLEET_RUN_ID", "run-a")
     for name in (
@@ -146,7 +151,7 @@ def test_prepare_run_id_override_moves_every_sub_path(monkeypatch, tmp_path):
 
 
 def test_prepare_honors_explicit_pool_status_dir(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "argv", ["env-fleet", "prepare"])
+    monkeypatch.setattr(sys, "argv", ["desktop-fleet", "prepare"])
     monkeypatch.setenv("OSWORLD_RUN_BASE", str(tmp_path))
     monkeypatch.setenv("OSWORLD_FLEET_RUN_ID", "run-a")
     monkeypatch.setenv("OSWORLD_DESKTOP_POOL_STATUS_DIR", str(tmp_path / "shared"))
@@ -650,7 +655,7 @@ def test_supervisor_reaps_gateway_process_on_teardown(tmp_path, monkeypatch):
 
     def fake_spawn(command, log_path):
         process = _FakeProcess(returncode=None)  # stays "alive" the whole time
-        if "env_fleet.broker" in command:
+        if "desktop_fleet.broker" in command:
             gateway_processes.append(process)
         else:
             replica_processes.append(process)
@@ -876,8 +881,8 @@ def test_submit_report_prints_next_steps_without_a_consumer(tmp_path):
     report = format_submit_report("12345", layout, SimpleNamespace())
 
     assert "Readiness:" in report
-    assert "uv run --no-sync python -m env_fleet.supervise status" in report
-    assert "uv run --no-sync python -m env_fleet.readiness" in report
+    assert "uv run --no-sync python -m desktop_fleet.supervise status" in report
+    assert "uv run --no-sync python -m desktop_fleet.readiness" in report
     assert "Cancel:" in report
     assert "prime_rl" not in report
     assert ".venv/bin/rl" not in report

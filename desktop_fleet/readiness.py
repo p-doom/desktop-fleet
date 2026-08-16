@@ -17,8 +17,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
 
-from env_fleet.registry import EnvFleetRegistry, read_registry_if_ready
-from env_fleet.spec import FleetRunLayout, load_runtime_env_file
+from desktop_fleet.registry import EnvFleetRegistry, read_registry_if_ready
+from desktop_fleet.spec import FleetRunLayout, load_runtime_env_file
 
 
 class ServerReadinessSummary(TypedDict):

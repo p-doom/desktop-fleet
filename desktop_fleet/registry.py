@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Self, overload
 
-from env_fleet.spec import EnvServerSpec
+from desktop_fleet.spec import EnvServerSpec
 
 
 @dataclass

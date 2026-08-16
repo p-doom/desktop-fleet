@@ -1,17 +1,17 @@
-"""env-fleet: Slurm-native, capacity-aware fleet management for verifiers env-servers.
+"""desktop-fleet: Slurm-native, capacity-aware fleet management for verifiers env-servers.
 
 The scarce resource is an externally-leased machine (a QEMU desktop VM behind an
-apptainer container behind a Slurm allocation). env-fleet leases them, registers
+apptainer container behind a Slurm allocation). desktop-fleet leases them, registers
 them, counts how many are actually warm, routes work only to replicas that have
 a free one, and restarts whatever loses theirs. It never sees an action, a
 grammar, or a reward.
 
-No consumer-specific coupling belongs anywhere but ``env_fleet.adapters``.
+No consumer-specific coupling belongs anywhere but ``desktop_fleet.adapters``.
 """
 
 from __future__ import annotations
 
-from env_fleet.readiness import (
+from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
     read_statuses,
@@ -21,13 +21,13 @@ from env_fleet.readiness import (
     stale_worker_statuses,
     sum_int_field,
 )
-from env_fleet.registry import (
+from desktop_fleet.registry import (
     EnvFleetRegistry,
     read_registry,
     read_registry_if_ready,
     upsert_registry,
 )
-from env_fleet.slurm import (
+from desktop_fleet.slurm import (
     SlurmJob,
     confirm_cancel,
     parse_squeue,
@@ -38,7 +38,7 @@ from env_fleet.slurm import (
     slurm_metadata,
     slurm_node_addrs,
 )
-from env_fleet.spec import (
+from desktop_fleet.spec import (
     EnvServerSpec,
     FleetRunLayout,
     default_public_host,

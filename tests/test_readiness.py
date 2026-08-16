@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from env_fleet.readiness import int_metadata, readiness_summary
-from env_fleet.registry import upsert_registry
-from env_fleet.spec import FleetRunLayout, make_server_specs
+from desktop_fleet.readiness import int_metadata, readiness_summary
+from desktop_fleet.registry import upsert_registry
+from desktop_fleet.spec import FleetRunLayout, make_server_specs
 
 
 @pytest.fixture(autouse=True)
