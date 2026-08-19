@@ -73,7 +73,7 @@ def test_prepare_harness_config_includes_desktop_pool(tmp_path):
         desktop_pool_max_rollouts_per_session=1,
         desktop_pool_checkout_timeout=900.0,
         desktop_pool_lease_timeout=300.0,
-        desktop_pool_startup_timeout=840.0,
+        desktop_pool_startup_timeout=1200.0,
         desktop_pool_startup_retry_backoff=30.0,
         desktop_pool_startup_retry_backoff_max=300.0,
         desktop_pool_status_heartbeat_interval=10.0,
@@ -94,7 +94,7 @@ def test_prepare_harness_config_includes_desktop_pool(tmp_path):
         "max_rollouts_per_session": 1,
         "checkout_timeout_s": 900.0,
         "lease_timeout_s": 300.0,
-        "startup_timeout_s": 840.0,
+        "startup_timeout_s": 1200.0,
         "startup_retry_backoff_s": 30.0,
         "startup_retry_backoff_max_s": 300.0,
         "status_heartbeat_interval_s": 10.0,
@@ -125,7 +125,7 @@ def test_prepare_uses_runtime_paths(monkeypatch, tmp_path):
 
     assert args.qcow_path == project_root().parent / "osworld_deployment" / "Ubuntu.qcow2"
     assert args.desktop_pool_runtime_dir == tmp_path / "runtime" / "pool"
-    assert args.desktop_pool_startup_timeout == 840.0
+    assert args.desktop_pool_startup_timeout == 1200.0
     assert args.desktop_pool_log_runtime_dir == tmp_path / "log"
 
 
@@ -191,7 +191,7 @@ def test_prepare_registry_metadata_includes_layout(tmp_path):
         desktop_pool_max_rollouts_per_session=1,
         desktop_pool_checkout_timeout=900.0,
         desktop_pool_lease_timeout=300.0,
-        desktop_pool_startup_timeout=840.0,
+        desktop_pool_startup_timeout=1200.0,
         desktop_pool_startup_retry_backoff=30.0,
         desktop_pool_startup_retry_backoff_max=300.0,
         desktop_pool_status_heartbeat_interval=10.0,
@@ -725,7 +725,7 @@ def test_submit_command_uses_slurm_options_and_exports(tmp_path):
         desktop_pool_max_rollouts_per_session=25,
         desktop_pool_checkout_timeout=120.0,
         desktop_pool_lease_timeout=300.0,
-        desktop_pool_startup_timeout=840.0,
+        desktop_pool_startup_timeout=1200.0,
         desktop_pool_startup_retry_backoff=5.0,
         desktop_pool_startup_retry_backoff_max=60.0,
         desktop_pool_status_heartbeat_interval=7.0,
@@ -765,7 +765,7 @@ def test_submit_command_uses_slurm_options_and_exports(tmp_path):
         "OSWORLD_DESKTOP_POOL_CHECKOUT_TIMEOUT=120.0" in item for item in command
     )
     assert any("OSWORLD_DESKTOP_POOL_LEASE_TIMEOUT=300.0" in item for item in command)
-    assert any("OSWORLD_DESKTOP_POOL_STARTUP_TIMEOUT=840.0" in item for item in command)
+    assert any("OSWORLD_DESKTOP_POOL_STARTUP_TIMEOUT=1200.0" in item for item in command)
     assert any(
         "OSWORLD_DESKTOP_POOL_STARTUP_RETRY_BACKOFF=5.0" in item for item in command
     )
