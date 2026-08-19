@@ -761,11 +761,8 @@ class FleetSupervisor:
             self.stop_replica(replica)
 
     def stop_replica(self, replica: ReplicaRuntime) -> None:
-        terminate_process(replica.process, timeout_s=self.policy.terminate_timeout_s)
-        cleanup_owned_process_groups(
-            replica.status_dir,
-            timeout_s=self.policy.terminate_timeout_s,
-            logger=self.logger,
+        terminate_replica_process_group(
+            replica.process, timeout_s=self.policy.terminate_timeout_s
         )
         replica.process = None
 
@@ -824,7 +821,7 @@ class FleetSupervisor:
         )
 
     def stop_gateway(self) -> None:
-        terminate_process(
+        terminate_replica_process_group(
             self.gateway_process, timeout_s=self.policy.terminate_timeout_s
         )
         self.gateway_process = None
@@ -1137,92 +1134,46 @@ def replica_status(
     }
 
 
-def terminate_process(
+def terminate_replica_process_group(
     process: subprocess.Popen[Any] | None,
     *,
     timeout_s: float,
 ) -> None:
-    if process is None or process.poll() is not None:
+    """Kill a replica's whole process group, whether or not the replica is alive.
+
+    ``spawn`` starts every replica with ``start_new_session=True``, so the group
+    id *is* the child's pid.  Reading it back with ``getpgid`` instead would fail
+    on precisely the case that leaks -- a worker that already died and left its
+    VMs behind, which is why this must not return early on an exited child.
+
+    Signalling the pid of a child we have already reaped cannot reach a
+    stranger's group: Linux does not recycle a pid that is still in use as the id
+    of a process group with live members, and once the group is empty the signal
+    is a no-op.  The VMs are in this group because ``desktop`` deliberately does
+    not give QEMU a session of its own.
+    """
+    if process is None:
         return
-    process_group_id = process_group_id_for_pid(process.pid)
-    if not safe_process_group_id(process_group_id):
-        process_group_id = None
-    if process_group_id is not None:
+    group_id = process.pid
+    if not safe_process_group_id(group_id):
+        return
+    with suppress(ProcessLookupError):
+        os.killpg(group_id, signal.SIGTERM)
+    if not wait_for_process_group_exit(group_id, timeout_s=timeout_s):
         with suppress(ProcessLookupError):
-            os.killpg(process_group_id, signal.SIGTERM)
-    else:
-        process.terminate()
-    try:
+            os.killpg(group_id, signal.SIGKILL)
+        wait_for_process_group_exit(group_id, timeout_s=min(timeout_s, 5.0))
+    with suppress(subprocess.TimeoutExpired):
         process.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        if process_group_id is not None:
-            with suppress(ProcessLookupError):
-                os.killpg(process_group_id, signal.SIGKILL)
-        else:
-            process.kill()
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=timeout_s)
-
-
-def cleanup_owned_process_groups(
-    status_dir: Path | None,
-    *,
-    timeout_s: float,
-    logger: logging.Logger,
-) -> None:
-    group_ids = owned_process_group_ids(status_dir)
-    if not group_ids:
-        return
-    logger.info("Cleaning %d owned desktop process groups", len(group_ids))
-    terminate_process_groups(group_ids, timeout_s=timeout_s)
-
-
-def owned_process_group_ids(status_dir: Path | None) -> tuple[int, ...]:
-    """Collect the QEMU/apptainer process groups this replica's status files claim."""
-    if status_dir is None or not status_dir.exists():
-        return ()
-    group_ids: list[int] = []
-    for status in read_statuses(status_dir, recursive=False):
-        for session in _mapping_list(status.get("sessions")):
-            health = session.get("health")
-            if isinstance(health, dict):
-                _append_unique_positive_int(group_ids, health.get("vm_pgid"))
-        for session in _mapping_list(status.get("starting_sessions")):
-            _append_unique_positive_int(group_ids, session.get("apptainer_pgid"))
-            pidfile = session.get("apptainer_pidfile")
-            if isinstance(pidfile, str):
-                _append_unique_positive_int(
-                    group_ids,
-                    process_group_id_from_pidfile(Path(pidfile)),
-                )
-    return tuple(group_ids)
-
-
-def terminate_process_groups(group_ids: tuple[int, ...], *, timeout_s: float) -> None:
-    group_ids = safe_process_group_ids(group_ids)
-    if not group_ids:
-        return
-    for process_group_id in group_ids:
-        with suppress(ProcessLookupError):
-            os.killpg(process_group_id, signal.SIGTERM)
-    if wait_for_process_groups_exit(group_ids, timeout_s=timeout_s):
-        return
-    for process_group_id in group_ids:
-        with suppress(ProcessLookupError):
-            os.killpg(process_group_id, signal.SIGKILL)
-    wait_for_process_groups_exit(group_ids, timeout_s=min(timeout_s, 5.0))
-
-
-def safe_process_group_ids(group_ids: tuple[int, ...]) -> tuple[int, ...]:
-    safe_ids: list[int] = []
-    for process_group_id in group_ids:
-        if safe_process_group_id(process_group_id) and process_group_id not in safe_ids:
-            safe_ids.append(process_group_id)
-    return tuple(safe_ids)
 
 
 def safe_process_group_id(process_group_id: int | None) -> bool:
-    """Never signal our own process group -- that would kill the supervisor."""
+    """Never signal our own process group -- that would kill the supervisor.
+
+    Unreachable while ``spawn`` passes ``start_new_session=True``, and kept for
+    the day somebody drops it: nothing else stands between that and a supervisor
+    that SIGKILLs itself along with the fleet.
+    """
     return (
         process_group_id is not None
         and process_group_id > 0
@@ -1230,43 +1181,15 @@ def safe_process_group_id(process_group_id: int | None) -> bool:
     )
 
 
-def wait_for_process_groups_exit(
-    group_ids: tuple[int, ...],
-    *,
-    timeout_s: float,
-) -> bool:
+def wait_for_process_group_exit(process_group_id: int, *, timeout_s: float) -> bool:
     deadline = time.monotonic() + timeout_s
     while True:
-        if not any(
-            process_group_alive(process_group_id) for process_group_id in group_ids
-        ):
+        if not process_group_alive(process_group_id):
             return True
         remaining_s = deadline - time.monotonic()
         if remaining_s <= 0:
             return False
         time.sleep(min(0.05, remaining_s))
-
-
-def process_group_id_from_pidfile(path: Path) -> int | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if (group_id := _positive_int_or_none(payload.get("pgid"))) is not None:
-        return group_id
-    process_id = _positive_int_or_none(payload.get("pid"))
-    if process_id is None:
-        return None
-    return process_group_id_for_pid(process_id)
-
-
-def process_group_id_for_pid(pid: int) -> int | None:
-    try:
-        return os.getpgid(pid)
-    except OSError:
-        return None
 
 
 def process_group_alive(process_group_id: int) -> bool:
@@ -1302,24 +1225,6 @@ def _linux_process_state_and_group(path: Path) -> tuple[str, int] | None:
         return fields[0], int(fields[2])
     except ValueError:
         return None
-
-
-def _mapping_list(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _append_unique_positive_int(values: list[int], value: object) -> None:
-    item = _positive_int_or_none(value)
-    if item is not None and item not in values:
-        values.append(item)
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    if isinstance(value, int) and value > 0:
-        return value
-    return None
 
 
 def archive_status_files(status_dir: Path | None, replica_name: str) -> Path | None:

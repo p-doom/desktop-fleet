@@ -26,8 +26,15 @@ it desktop-fleet adds:
    `backend_capacity_rank`). Requests queue instead of failing when every leased
    machine is busy; `ipc://` cannot express this.
 4. Supervision (`desktop_fleet.supervise`) — restart a replica that lost its
-   desktops, reap the orphaned QEMU/apptainer *process groups* it left behind,
-   and give up loudly with an `fleet_unrecoverable.json` marker.
+   desktops, reap the *whole process group* of the replica it spawned so a
+   desktop the replica left behind dies with it, and give up loudly with an
+   `fleet_unrecoverable.json` marker.
+
+   This package never names QEMU or apptainer. It reaps by process group
+   because `desktop` deliberately keeps a VM in its worker's group, and it
+   reaps a replica whose own process has already exited, which is the case that
+   leaks: nothing on disk records a per-VM process group, and a VM still
+   booting has not published anything at all.
 
 ## Layout
 

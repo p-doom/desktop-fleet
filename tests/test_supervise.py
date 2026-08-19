@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import desktop_fleet.supervise as supervise_module
 from desktop_fleet.registry import upsert_registry
 from desktop_fleet.slurm import SlurmJob
 from desktop_fleet.spec import (
@@ -36,15 +39,16 @@ from desktop_fleet.supervise import (
     osworld_deployment_root,
     osworld_qcow_path,
     osworld_root,
-    owned_process_group_ids,
     parse_fleet_args,
     parse_prepare_args,
     parse_sbatch_job_id,
+    process_group_alive,
     read_pool_health,
     registry_metadata,
     resolve_prepare_layout,
     restart_reason,
-    safe_process_group_ids,
+    safe_process_group_id,
+    terminate_replica_process_group,
 )
 
 
@@ -355,40 +359,43 @@ def test_read_pool_health_splits_fresh_and_stale_starting_sessions(tmp_path):
     assert health.oldest_starting_age_s >= 100.0
 
 
-def test_owned_process_group_ids_reads_sessions_and_starting_pidfiles(tmp_path):
-    status_dir = tmp_path / "status"
-    workdir = tmp_path / "runtime" / "w0"
-    status_dir.mkdir()
-    workdir.mkdir(parents=True)
-    pidfile = workdir / "apptainer.pid.json"
-    pidfile.write_text(json.dumps({"pid": 123, "pgid": 456}), encoding="utf-8")
-    (status_dir / "worker.json").write_text(
-        json.dumps(
-            {
-                "updated_at": time.time(),
-                "closed": False,
-                "sessions": [{"health": {"vm_pgid": 111}}],
-                "starting_sessions": [{"apptainer_pidfile": str(pidfile)}],
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_a_replicas_process_group_is_reaped_after_the_replica_itself_has_died():
+    """The actual leak: a worker that crashed and left its desktops behind.
 
-    assert owned_process_group_ids(status_dir) == (111, 456)
+    ``sh -c 'sleep 300 & exit 0'`` has exactly that shape -- the group leader
+    exits, a child outlives it in the same process group -- because ``desktop``
+    deliberately keeps QEMU in the pool process's group.  Returning early on an
+    already-exited child strands that VM for the rest of the allocation, holding
+    its 8 GB and its four host ports, and no status file can rescue it: nothing
+    ever wrote the VM's process group anywhere.
+    """
+    process = subprocess.Popen(["sh", "-c", "sleep 300 & exit 0"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.01)
+        assert process.poll() is not None, "the group leader should have exited"
+        assert process_group_alive(process.pid), "the child should outlive the leader"
+
+        terminate_replica_process_group(process, timeout_s=10.0)
+
+        assert not process_group_alive(process.pid)
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
-def test_safe_process_group_ids_skip_supervisor_group():
-    assert safe_process_group_ids((os.getpgrp(), 123456789, 123456789)) == (123456789,)
+def test_the_supervisors_own_group_is_never_signalled():
+    """Unreachable while ``spawn`` uses ``start_new_session=True``, and the only
+    thing between dropping that and a supervisor SIGKILLing itself."""
+    assert not safe_process_group_id(os.getpgrp())
+    assert not safe_process_group_id(0)
+    assert not safe_process_group_id(None)
+    assert safe_process_group_id(123456789)
 
 
 class _FakeProcess:
-    """A minimal stand-in for ``subprocess.Popen`` driven entirely by the test.
-
-    ``pid`` is a large synthetic value on purpose: ``terminate_process`` calls
-    ``os.getpgid(pid)`` before signalling anything, which raises ``OSError`` for
-    a pid that is not a real running process on this machine. That keeps every
-    test in this section from ever calling the real ``os.killpg``.
-    """
+    """A minimal stand-in for ``subprocess.Popen`` driven entirely by the test."""
 
     _next_pid = 900001
 
@@ -396,24 +403,31 @@ class _FakeProcess:
         self.pid = _FakeProcess._next_pid
         _FakeProcess._next_pid += 1
         self.returncode = returncode
-        self.terminate_calls = 0
-        self.kill_calls = 0
 
     def poll(self) -> int | None:
         return self.returncode
 
-    def terminate(self) -> None:
-        self.terminate_calls += 1
-        if self.returncode is None:
-            self.returncode = -15
-
-    def kill(self) -> None:
-        self.kill_calls += 1
-        if self.returncode is None:
-            self.returncode = -9
-
     def wait(self, timeout: float | None = None) -> int | None:
         return self.returncode
+
+
+@pytest.fixture
+def recorded_signals(monkeypatch):
+    """Record every process group the supervisor signals, and signal nothing.
+
+    Teardown goes through ``os.killpg`` on the child's own pid, so a synthetic
+    pid is not enough to keep a test off a real process group -- pids that high
+    do exist on a busy node.  Recording is also the only way to check the
+    contract that matters: the whole GROUP is signalled, not just the child.
+    """
+    signalled: list[tuple[int, int]] = []
+
+    def fake_killpg(process_group_id: int, sig: int) -> None:
+        signalled.append((process_group_id, sig))
+
+    monkeypatch.setattr(supervise_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(supervise_module, "process_group_alive", lambda _: False)
+    return signalled
 
 
 def _make_registry_and_config(tmp_path, *, with_pool_status: bool = False):
@@ -634,7 +648,9 @@ def test_supervisor_gives_up_after_repeated_fleet_restarts(tmp_path, monkeypatch
     assert marker["fleet_restart_count"] == supervisor.fleet_restart_count
 
 
-def test_supervisor_reaps_gateway_process_on_teardown(tmp_path, monkeypatch):
+def test_supervisor_reaps_gateway_process_on_teardown(
+    tmp_path, monkeypatch, recorded_signals
+):
     monkeypatch.setattr(signal, "signal", lambda *args, **kwargs: None)
     policy = SupervisorPolicy(
         poll_s=0.0,
@@ -672,15 +688,17 @@ def test_supervisor_reaps_gateway_process_on_teardown(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert len(gateway_processes) == 1
-    assert gateway_processes[0].terminate_calls == 1, (
-        "the gateway subprocess must be reaped on teardown"
-    )
     assert supervisor.gateway_process is None
     # the replica was healthy throughout (long startup grace), so it was never
     # restarted -- only reaped once, at teardown, like the gateway.
     assert supervisor.replicas[0].restart_count == 0
     assert len(replica_processes) == 1
-    assert replica_processes[0].terminate_calls == 1
+    # Each child's own pid IS its group id (spawn uses start_new_session=True), so
+    # a desktop the child left behind is inside the group that gets SIGTERM.
+    assert set(recorded_signals) == {
+        (replica_processes[0].pid, signal.SIGTERM),
+        (gateway_processes[0].pid, signal.SIGTERM),
+    }
 
 
 def test_submit_command_uses_slurm_options_and_exports(tmp_path):
