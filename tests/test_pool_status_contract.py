@@ -59,14 +59,17 @@ class _PooledSession:
 def _port_allocator():
     slots = itertools.count()
 
-    def allocate(*, lock_dir: Path, work_dir=None, log_dir=None) -> PortLease:
+    def allocate(*, lock_dir: Path, log_dir, work_dir=None) -> PortLease:
         slot = next(slots)
         workdir = Path(work_dir or lock_dir) / f"w{slot}"
+        logdir = Path(log_dir) / f"w{slot}"
         workdir.mkdir(parents=True, exist_ok=True)
+        logdir.mkdir(parents=True, exist_ok=True)
         return PortLease(
             ports=ports_for_worker(51000, slot),
             slot=slot,
             workdir=workdir,
+            logdir=logdir,
             _lock_file=(lock_dir / f"w{slot}.lock").open("w"),
         )
 
