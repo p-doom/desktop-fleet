@@ -67,13 +67,19 @@ def load_runtime_env_file(
     *,
     path: str | Path | None = None,
 ) -> Path | None:
-    """Load ``KEY=value`` runtime settings into ``env`` before argument parsing."""
+    """Load ``KEY=value`` runtime defaults into ``env`` before argument parsing.
+
+    A variable already present in ``env`` wins.  This runs before argparse, so
+    every ``Opt`` with an environment name reads it: overwriting would make
+    ``OSWORLD_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...`` lose
+    silently to whatever the file happens to say.
+    """
     resolved = _runtime_env_file_path(env=env, path=path)
     if resolved is None or not resolved.is_file():
         return None
 
     for key, value in _runtime_env_values(resolved).items():
-        env[key] = value
+        env.setdefault(key, value)
     return resolved
 
 

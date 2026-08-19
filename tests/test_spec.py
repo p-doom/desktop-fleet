@@ -365,6 +365,26 @@ def test_runtime_env_file_uses_python_dotenv_interpolation(monkeypatch, tmp_path
     assert env == {"HF_HOME": "/huggingface"}
 
 
+def test_an_already_exported_variable_beats_the_runtime_env_file(tmp_path):
+    """The file supplies defaults; the caller's environment is the authority.
+
+    This loader runs before argparse, so it is what every environment-backed
+    ``Opt`` reads.  Overwriting here silently discards
+    ``OSWORLD_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...``.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OSWORLD_FLEET_BASE_PORT=5400\nOSWORLD_FLEET_HOST=from-file\n", encoding="utf-8"
+    )
+    env = {"OSWORLD_FLEET_BASE_PORT": "5300"}
+
+    assert load_runtime_env_file(env=env, path=env_file) == env_file
+    assert env == {
+        "OSWORLD_FLEET_BASE_PORT": "5300",
+        "OSWORLD_FLEET_HOST": "from-file",
+    }
+
+
 def test_runtime_env_file_can_be_disabled():
     env = {"RL_RUNTIME_ENV_FILE": ""}
 
