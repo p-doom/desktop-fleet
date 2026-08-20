@@ -114,14 +114,17 @@ def parse_squeue(output: str) -> list[SlurmJob]:
 
 
 def slurm_job_id_from_registry(registry: EnvFleetRegistry) -> str | None:
+    """Read the job id ``slurm_metadata`` recorded, or nothing.
+
+    Never guessed from ``run_id`` looking like a number: an id that was not
+    recorded by the node that holds the allocation is not a job id, and
+    ``scancel`` on a guess cancels a stranger's job.
+    """
     slurm = registry.metadata.get("slurm")
-    if isinstance(slurm, Mapping):
-        value = slurm.get("slurm_job_id") or slurm.get("job_id")
-        if value:
-            return str(value)
-    if str(registry.run_id).isdigit():
-        return str(registry.run_id)
-    return None
+    if not isinstance(slurm, Mapping):
+        return None
+    value = slurm.get("slurm_job_id")
+    return str(value) if value else None
 
 
 def select_cancel_job(
