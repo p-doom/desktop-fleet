@@ -41,9 +41,16 @@ from desktop_fleet.readiness import (
     stale_worker_statuses,
     sum_int_field,
 )
+from desktop_fleet.supervise import read_pool_health
 
 READY_SESSIONS = 3
 STALE_AFTER_S = 120.0
+
+#: The status fields this package reads with *no* default, so a rename raises
+#: instead of reading as zero. ``desktop.vm.pool.CONSUMED_STATUS_FIELDS`` covers
+#: only the ``.get(field, 0)`` ones and names neither of these, which is why they
+#: are asserted here.
+REQUIRED_STATUS_FIELDS = ("startup_timeout_s", "starting_sessions")
 
 
 class _PooledSession:
@@ -151,6 +158,32 @@ def test_a_backend_is_ranked_from_the_counts_the_pool_actually_wrote(produced):
     assert backend_capacity_rank(backend) == 0
     backend.reserved_ready_sessions = READY_SESSIONS
     assert backend_capacity_rank(backend) == 1
+
+
+def test_the_startup_budget_the_supervisor_scores_stuck_desktops_against(produced):
+    """The restart decision, over the payload the pool actually wrote.
+
+    ``summarize_starting_sessions`` divides the pool's starting desktops into
+    ones inside their startup budget and ones past it, and only the latter
+    justify a restart. It reads ``startup_timeout_s`` and each
+    ``starting_sessions[].created_at`` with no default on purpose: scoring an
+    unreadable session as *within* budget is the one answer that is never safe,
+    because it is what stops a replica whose desktops are permanently stuck
+    starting from ever being restarted.
+    """
+    payload, status_dir = produced
+
+    missing = [name for name in REQUIRED_STATUS_FIELDS if name not in payload]
+    assert missing == [], f"desktop stopped writing fields desktop_fleet requires: {missing}"
+    assert isinstance(payload["starting_sessions"], list)
+    assert all("created_at" in session for session in payload["starting_sessions"])
+
+    health = read_pool_health(status_dir, status_stale_after_s=STALE_AFTER_S)
+
+    assert health.starting == payload["starting"]
+    assert health.fresh_starting + health.stale_starting == len(
+        payload["starting_sessions"]
+    )
 
 
 @pytest.mark.parametrize("field", ["closed", "updated_at"])

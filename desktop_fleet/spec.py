@@ -59,6 +59,13 @@ def scratch_subdir(*parts: str, env: Mapping[str, str] = os.environ) -> Path:
 
 
 def slurm_run_id(env: Mapping[str, str] = os.environ) -> str:
+    """The run id to *look under* when no command line named one.
+
+    Only the read-only commands may take this fallback. ``supervise prepare``
+    creates the run's directories and writes its registry, so it requires an
+    explicit id: two off-scheduler prepares sharing one would sum each other's
+    ready counts through one status tree.
+    """
     return env.get("SLURM_JOB_ID") or "manual"
 
 
@@ -123,7 +130,6 @@ class EnvServerSpec:
     config_path: str
     log_path: str
     pool_status_dir: str | None = None
-    status: str = "starting"
 
 
 def default_public_host(

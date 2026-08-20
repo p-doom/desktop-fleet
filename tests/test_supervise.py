@@ -47,7 +47,6 @@ from desktop_fleet.supervise import (
     registry_metadata,
     resolve_prepare_layout,
     restart_reason,
-    safe_process_group_id,
     terminate_replica_process_group,
 )
 
@@ -383,15 +382,6 @@ def test_a_replicas_process_group_is_reaped_after_the_replica_itself_has_died():
     finally:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-
-
-def test_the_supervisors_own_group_is_never_signalled():
-    """Unreachable while ``spawn`` uses ``start_new_session=True``, and the only
-    thing between dropping that and a supervisor SIGKILLing itself."""
-    assert not safe_process_group_id(os.getpgrp())
-    assert not safe_process_group_id(0)
-    assert not safe_process_group_id(None)
-    assert safe_process_group_id(123456789)
 
 
 class _FakeProcess:

@@ -335,7 +335,12 @@ def parse_prepare_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     # ones would pin every sub-path to the environment's run while --run-id named
     # a different one, so `prepare --run-id NEW` wrote NEW's registry, configs and
     # logs into OLD's directories.
-    parser.add_argument("--run-id", default=layout.run_id)
+    # ``prepare`` is the only command that creates the run's directories and
+    # writes its registry, so it is the one that must not accept an unnamed run:
+    # two off-scheduler runs would both land on the fallback id, share one
+    # registry and one pool status tree, and sum each other's ready counts.
+    named_run_id = env.get("OSWORLD_FLEET_RUN_ID") or env.get("SLURM_JOB_ID")
+    parser.add_argument("--run-id", default=named_run_id, required=named_run_id is None)
     parser.add_argument("--run-base", type=Path, default=layout.run_base)
     parser.add_argument(
         "--run-root", type=Path, default=env_path(env, "OSWORLD_FLEET_RUN_ROOT")
@@ -458,7 +463,7 @@ def harness_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def resolve_artifact_output_dir(args: argparse.Namespace) -> Path:
-    output_dir = vars(args).get("artifact_output_dir")
+    output_dir = args.artifact_output_dir
     if output_dir is not None:
         return Path(output_dir)
     return args.run_root / "artifacts"
@@ -496,7 +501,7 @@ def backend_addresses(
 
 def resolve_replica_hosts(args: argparse.Namespace) -> list[str]:
     """Resolve one routable host per fleet node."""
-    if explicit_hosts := split_csv(vars(args).get("replica_hosts", "")):
+    if explicit_hosts := split_csv(args.replica_hosts):
         return explicit_hosts
     if slurm_hosts := slurm_node_addrs(os.environ):
         return slurm_hosts
@@ -963,51 +968,26 @@ def summarize_starting_sessions(
     now: float,
 ) -> StartingSessionSummary:
     """Split ``starting`` desktops into ones still within their startup budget
-    and ones that have blown it -- only the latter justify a restart."""
+    and ones that have blown it -- only the latter justify a restart.
+
+    Reads ``startup_timeout_s`` and ``starting_sessions`` without a default: a
+    status file missing either cannot be scored, and treating it as within
+    budget is the one answer that is never safe -- it is what stops a replica
+    whose desktops are permanently stuck starting from ever being restarted.
+    """
     fresh = 0
     stale = 0
     oldest_age_s: float | None = None
     for status in statuses:
-        startup_timeout_s = _positive_float_or_none(status.get("startup_timeout_s"))
-        sessions = status.get("starting_sessions")
-        if not isinstance(sessions, list):
-            fresh += _nonnegative_int(status.get("starting"))
-            continue
-        for session in sessions:
-            if not isinstance(session, dict):
-                fresh += 1
-                continue
-            created_at = _positive_float_or_none(session.get("created_at"))
-            age_s = (
-                max(0.0, now - created_at)
-                if created_at is not None
-                else _positive_float_or_none(session.get("age_s"))
-            )
-            if age_s is not None:
-                oldest_age_s = (
-                    age_s if oldest_age_s is None else max(oldest_age_s, age_s)
-                )
-            if (
-                startup_timeout_s is not None
-                and age_s is not None
-                and age_s >= startup_timeout_s
-            ):
+        startup_timeout_s = float(status["startup_timeout_s"])
+        for session in status["starting_sessions"]:
+            age_s = max(0.0, now - float(session["created_at"]))
+            oldest_age_s = age_s if oldest_age_s is None else max(oldest_age_s, age_s)
+            if age_s >= startup_timeout_s:
                 stale += 1
             else:
                 fresh += 1
     return {"fresh": fresh, "stale": stale, "oldest_age_s": oldest_age_s}
-
-
-def _positive_float_or_none(value: object) -> float | None:
-    if isinstance(value, int | float) and value >= 0:
-        return float(value)
-    return None
-
-
-def _nonnegative_int(value: object) -> int:
-    if isinstance(value, int) and value >= 0:
-        return value
-    return 0
 
 
 def observe_failure_window(
@@ -1155,8 +1135,10 @@ def terminate_replica_process_group(
     if process is None:
         return
     group_id = process.pid
-    if not safe_process_group_id(group_id):
-        return
+    assert group_id != os.getpgrp(), (
+        "refusing to signal the supervisor's own process group; "
+        "spawn() must keep start_new_session=True"
+    )
     with suppress(ProcessLookupError):
         os.killpg(group_id, signal.SIGTERM)
     if not wait_for_process_group_exit(group_id, timeout_s=timeout_s):
@@ -1165,20 +1147,6 @@ def terminate_replica_process_group(
         wait_for_process_group_exit(group_id, timeout_s=min(timeout_s, 5.0))
     with suppress(subprocess.TimeoutExpired):
         process.wait(timeout=timeout_s)
-
-
-def safe_process_group_id(process_group_id: int | None) -> bool:
-    """Never signal our own process group -- that would kill the supervisor.
-
-    Unreachable while ``spawn`` passes ``start_new_session=True``, and kept for
-    the day somebody drops it: nothing else stands between that and a supervisor
-    that SIGKILLs itself along with the fleet.
-    """
-    return (
-        process_group_id is not None
-        and process_group_id > 0
-        and process_group_id != os.getpgrp()
-    )
 
 
 def wait_for_process_group_exit(process_group_id: int, *, timeout_s: float) -> bool:
@@ -1535,7 +1503,6 @@ def status(args: argparse.Namespace) -> int:
             registry=layout.registry_path,
             status_dir=None,
             pool_status_dir=layout.pool_status_dir,
-            run_root=layout.run_root,
             min_ready_sessions=args.min_ready_sessions,
             expected_servers=args.expected_servers,
             status_stale_after_s=args.status_stale_after_s,
@@ -1682,8 +1649,6 @@ def cancel(args: argparse.Namespace) -> int:
     job_id = args.job_id
     if job_id is None and registry is not None:
         job_id = slurm_job_id_from_registry(registry)
-    if job_id is None and str(args.run_id).isdigit():
-        job_id = str(args.run_id)
     if job_id is None:
         print("Could not determine a Slurm job id for this fleet.", file=sys.stderr)
         return 2
