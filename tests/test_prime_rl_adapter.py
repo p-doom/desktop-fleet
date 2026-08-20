@@ -92,6 +92,7 @@ def test_render_prime_rl_fleet_config_uses_v1_schema(tmp_path):
         "output_dir": "/old",
         "orchestrator": {
             "max_inflight_rollouts": 1,
+            "group_size": 4,
             "train": {"env": [{"name": "old"}]},
         },
         "inference": {"gpu_memory_utilization": 0.85},
@@ -108,7 +109,7 @@ def test_render_prime_rl_fleet_config_uses_v1_schema(tmp_path):
 
     env = config["orchestrator"]["train"]["env"][0]
     assert config["output_dir"] == str(tmp_path / "trainer-output")
-    assert config["orchestrator"]["max_inflight_rollouts"] == 2
+    assert config["orchestrator"]["max_inflight_rollouts"] == 4
     assert env["address"] == "tcp://node001:5200"
     assert env["taskset"] == {
         "id": "rl",
@@ -125,6 +126,50 @@ def test_render_prime_rl_fleet_config_uses_v1_schema(tmp_path):
     assert env["retries"] == {"rollout": {"max_retries": 1}}
     assert env["max_turns"] == 4
     assert config["inference"] == {"gpu_memory_utilization": 0.85}
+
+
+@pytest.mark.parametrize("key", ["env_name_prefix", "max_tasks", "shuffle_seed"])
+def test_render_prime_rl_fleet_config_requires_every_taskset_key(key):
+    """A substituted shuffle_seed of 0 shuffles differently, and silently."""
+    metadata = {
+        "env_id": "rl",
+        "env_name_prefix": "osworld",
+        "task_base_path": "/tasks",
+        "max_tasks": 4,
+        "shuffle_seed": 7,
+        "harness": {"max_steps": 4},
+        "gateway": {"public_address": "tcp://node001:5200"},
+    }
+    del metadata[key]
+
+    with pytest.raises(ValueError, match=key):
+        prime_rl.external_env_config(metadata, rollout_timeout=3600, max_retries=1)
+
+
+def test_render_prime_rl_fleet_config_requires_group_size():
+    """Our 1 was not PrimeRL's group size, and the inflight cap derives from it."""
+    config = {
+        "output_dir": "/old",
+        "orchestrator": {"max_inflight_rollouts": 1, "train": {"env": []}},
+    }
+
+    with pytest.raises(ValueError, match="group_size"):
+        prime_rl.configure_external_fleet(
+            config,
+            metadata={
+                "env_id": "rl",
+                "env_name_prefix": "osworld",
+                "task_base_path": "/tasks",
+                "max_tasks": 4,
+                "shuffle_seed": 7,
+                "harness": {"max_steps": 4},
+                "gateway": {"public_address": "tcp://node001:5200"},
+            },
+            output_dir=Path("/out"),
+            max_inflight_rollouts=2,
+            rollout_timeout=3600,
+            max_retries=1,
+        )
 
 
 def test_render_prime_rl_fleet_config_requires_gateway_address(tmp_path):

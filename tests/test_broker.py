@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import msgpack
 import pytest
@@ -28,7 +29,9 @@ from desktop_fleet.broker import (
     gateway_backend_addresses,
     gateway_backend_status_dirs,
     gateway_bind_address,
+    wait_for_registry_gateway,
 )
+from desktop_fleet.registry import upsert_registry
 from desktop_fleet.spec import make_server_specs
 from desktop_fleet.supervise import BROKER_MODULE, broker_command
 
@@ -83,6 +86,41 @@ def test_broker_resolves_cross_node_backends_from_registry_gateway_metadata(tmp_
     ]
     assert gateway_backend_addresses({}, servers) == ["tcp://node001:5200"]
     assert gateway_bind_address({}) is None
+
+
+def test_broker_refuses_a_registry_that_declares_no_expected_server_count(tmp_path):
+    """A defaulted 0 made the quorum check `len(servers) >= 0`, always true."""
+    registry_path = tmp_path / "registry.json"
+    upsert_registry(
+        path=registry_path,
+        run_id="12345",
+        metadata={"gateway": {"bind_address": "tcp://0.0.0.0:5204"}},
+        servers=make_server_specs(
+            host="node001",
+            bind_host="0.0.0.0",
+            base_port=5200,
+            node_rank=0,
+            servers_per_node=1,
+            workers_per_server=2,
+            replica_count=2,
+            replica_offset=0,
+            name_prefix="osworld",
+            config_dir=tmp_path,
+            log_dir=tmp_path,
+            pool_status_root=tmp_path / "status",
+        )[:1],
+    )
+    args = SimpleNamespace(
+        registry=registry_path,
+        wait_timeout_s=1.0,
+        poll_s=0.01,
+        bind_address=None,
+        backend_address=[],
+        backend_status_dir=[],
+    )
+
+    with pytest.raises(ValueError, match="expected_env_servers"):
+        wait_for_registry_gateway(args)
 
 
 def test_backend_capacity_rank_prefers_a_free_leased_machine():

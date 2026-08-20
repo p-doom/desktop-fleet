@@ -190,7 +190,9 @@ def configure_external_fleet(
             max_retries=max_retries,
         )
     ]
-    group_size = orchestrator.get("group_size", 1)
+    # Substituting a group size disagrees with the one PrimeRL actually samples
+    # with, and the inflight cap below is derived from it.
+    group_size = orchestrator.get("group_size")
     if not isinstance(group_size, int) or group_size < 1:
         raise ValueError(
             "base config orchestrator.group_size must be a positive integer"
@@ -237,13 +239,13 @@ def external_env_config(
         raise ValueError("registry harness.max_steps must be a positive integer")
 
     return {
-        "name": str(metadata.get("env_name_prefix") or env_id),
+        "name": required_string(metadata, "env_name_prefix"),
         "address": gateway_public_address(metadata),
         "taskset": {
             "id": env_id,
             "base_path": task_base_path,
-            "max_tasks": int(metadata.get("max_tasks", 0)),
-            "shuffle_seed": int(metadata.get("shuffle_seed", 0)),
+            "max_tasks": required_int(metadata, "max_tasks"),
+            "shuffle_seed": required_int(metadata, "shuffle_seed"),
         },
         "harness": harness,
         "timeout": {"rollout": rollout_timeout},
@@ -275,6 +277,13 @@ def required_string(values: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"registry metadata is missing {key}")
     return value.strip()
+
+
+def required_int(values: Mapping[str, Any], key: str) -> int:
+    value = values.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"registry metadata is missing {key}")
+    return value
 
 
 def validate_prime_rl_config(path: Path) -> None:

@@ -768,7 +768,14 @@ def wait_for_registry_gateway(args: argparse.Namespace) -> dict[str, Any]:
             time.sleep(args.poll_s)
             continue
         metadata = registry.metadata
-        expected = int(metadata.get("expected_env_servers", 0) or 0)
+        if "expected_env_servers" not in metadata:
+            # Defaulting this to 0 made the quorum check below vacuous, so the
+            # broker started routing to whichever single node had registered
+            # first and the rest of the fleet never entered the rotation.
+            raise ValueError(
+                f"{args.registry}: registry metadata has no expected_env_servers"
+            )
+        expected = int(metadata["expected_env_servers"])
         backend_addresses = list(args.backend_address) or gateway_backend_addresses(
             metadata,
             registry.servers,
