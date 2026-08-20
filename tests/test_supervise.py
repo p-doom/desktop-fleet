@@ -931,6 +931,7 @@ def test_status_format_and_registry_rendering(tmp_path):
         "leased": 0,
         "stale_status_files": 0,
         "total_failed": 1,
+        "stale_leases_retired": 3,
         "retry_scheduled_workers": 1,
         "cooling_down_workers": 1,
         "consecutive_start_failures": 2,
@@ -967,6 +968,20 @@ def test_status_format_and_registry_rendering(tmp_path):
     assert "Startup retry: scheduled_workers=1" in report
     assert "cooldown_remaining_s=12.5" in report
     assert "tcp://node001:5200" in report
+    assert "stale_leases_retired=3" in report
+
+    # A defaulted read would print stale_leases_retired=0 and suppress the
+    # unhealthy-replica line entirely, so an incomplete summary reads as a
+    # healthy fleet.
+    for key in ("stale_leases_retired", "unhealthy_servers", "server_summaries"):
+        with pytest.raises(KeyError, match=key):
+            format_status_report(
+                layout,
+                registry,
+                None,
+                {k: v for k, v in summary.items() if k != key},
+                [job],
+            )
 
 
 def test_path_helpers_default_to_project_scratch_and_sibling_osworld(monkeypatch):

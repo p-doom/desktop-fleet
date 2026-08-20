@@ -1589,10 +1589,10 @@ def format_status_report(
             f"leased={summary['leased']} "
             f"stale_status_files={summary['stale_status_files']} "
             f"total_failed={summary['total_failed']} "
-            f"stale_leases_retired={summary.get('stale_leases_retired', 0)}",
+            f"stale_leases_retired={summary['stale_leases_retired']}",
         ]
     )
-    if unhealthy_servers := int(summary.get("unhealthy_servers", 0)):
+    if unhealthy_servers := summary["unhealthy_servers"]:
         lines.append(f"Unhealthy replicas: {unhealthy_servers}")
     retry_scheduled_workers = summary["retry_scheduled_workers"]
     cooling_down_workers = summary["cooling_down_workers"]
@@ -1618,11 +1618,7 @@ def format_status_report(
         lines.append(f"Fleet unrecoverable marker: {unrecoverable_path}")
 
     if registry is not None and registry.servers:
-        server_summaries = {
-            item["name"]: item
-            for item in summary.get("server_summaries", [])
-            if isinstance(item, Mapping) and item.get("name")
-        }
+        server_summaries = {item["name"]: item for item in summary["server_summaries"]}
         lines.append("Env servers:")
         for server in registry.servers:
             server_summary = server_summaries.get(server.name)
