@@ -46,7 +46,14 @@ def test_readiness_aggregates_registry_and_pool_status(tmp_path):
     server_status_dir = Path(server.pool_status_dir)
     server_status_dir.mkdir(parents=True)
     (server_status_dir / "worker-a.json").write_text(
-        json.dumps({"closed": False, "ready": 2, "starting": 0}),
+        json.dumps(
+            {
+                "closed": False,
+                "updated_at": time.time(),
+                "ready": 2,
+                "starting": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -54,10 +61,10 @@ def test_readiness_aggregates_registry_and_pool_status(tmp_path):
         SimpleNamespace(
             registry=registry_path,
             status_dir=status_dir,
-            pool_status_dir=None,
-            run_root=registry_path.parent,
+            pool_status_dir=status_dir,
             min_ready_sessions=-1,
             expected_servers=0,
+            status_stale_after_s=120.0,
         )
     )
 
@@ -102,6 +109,7 @@ def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
         json.dumps(
             {
                 "closed": False,
+                "updated_at": time.time(),
                 "ready": 1,
                 "total_failed": 3,
                 "retry_scheduled": True,
@@ -116,10 +124,10 @@ def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
         SimpleNamespace(
             registry=layout.registry_path,
             status_dir=None,
-            pool_status_dir=None,
-            run_root=layout.run_root,
+            pool_status_dir=layout.pool_status_dir,
             min_ready_sessions=-1,
             expected_servers=0,
+            status_stale_after_s=120.0,
         )
     )
 
@@ -180,8 +188,7 @@ def test_readiness_summary_ignores_stale_status_files(tmp_path):
         SimpleNamespace(
             registry=layout.registry_path,
             status_dir=None,
-            pool_status_dir=None,
-            run_root=layout.run_root,
+            pool_status_dir=layout.pool_status_dir,
             min_ready_sessions=-1,
             expected_servers=0,
             status_stale_after_s=120.0,

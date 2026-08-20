@@ -75,12 +75,11 @@ def readiness_summary(args: Any) -> ReadinessSummary:
     registry_ready = registry is not None and server_count >= expected_servers
     status_dir = resolve_status_dir(
         args.status_dir,
-        args.run_root,
         metadata,
         pool_status_dir=args.pool_status_dir,
     )
     statuses = read_statuses(status_dir, recursive=True)
-    status_stale_after_s = getattr(args, "status_stale_after_s", None)
+    status_stale_after_s = args.status_stale_after_s
     now = time.time()
     active_statuses = active_worker_statuses(
         statuses,
@@ -297,20 +296,23 @@ def resolve_min_ready(args: Any, metadata: Mapping[str, Any]) -> int:
 
 def resolve_status_dir(
     status_dir: Path | None,
-    run_root: Path,
     metadata: Mapping[str, Any],
     *,
-    pool_status_dir: Path | None = None,
+    pool_status_dir: Path,
 ) -> Path:
-    """Choose the explicit status dir or derive it from registry pool metadata."""
+    """Choose the explicit status dir or derive it from registry pool metadata.
+
+    ``pool_status_dir`` is what answers before the registry exists, which is the
+    normal state while the fleet is still coming up, so it is required rather
+    than derived: a guessed status directory reads as an empty pool, and an
+    empty pool is indistinguishable from a fleet that never started.
+    """
     if status_dir is not None:
         return status_dir
     layout = FleetRunLayout.from_metadata(metadata)
     if layout is not None:
         return layout.pool_status_dir
-    if pool_status_dir is not None:
-        return Path(pool_status_dir)
-    return run_root.parent / "pool" / "status"
+    return Path(pool_status_dir)
 
 
 def int_metadata(metadata: Mapping[str, Any], key: str, *, default: int) -> int:
@@ -390,7 +392,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Wait for an env fleet registry and warm desktop pool readiness."
     )
-    parser.add_argument("--run-root", type=Path, default=layout.run_root)
     parser.add_argument("--registry", type=Path, default=layout.registry_path)
     parser.add_argument(
         "--pool-status-dir",
