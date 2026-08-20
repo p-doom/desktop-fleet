@@ -131,6 +131,8 @@ class ZMQRolloutGateway:
             raise ValueError("backend_status_dirs must match backend_addresses")
         if not all(backend_status_dirs):
             raise ValueError("backend_status_dirs entries must not be empty")
+        if health_check_interval <= 0:
+            raise ValueError("health_check_interval must be positive")
         self.bind_address = bind_address
         self.backends = [
             GatewayBackend(
@@ -525,13 +527,6 @@ class ZMQRolloutGateway:
 
     async def poll_backend_health(self) -> None:
         """Probe backend health using the env-server inline health protocol."""
-        if self.health_check_interval <= 0:
-            now = time.monotonic()
-            for backend in self.backends:
-                self.refresh_backend_capacity(backend, now=now)
-                backend.healthy = True
-            return
-
         now = time.monotonic()
         for backend in self.backends:
             self.refresh_backend_capacity(backend, now=now)
@@ -584,11 +579,6 @@ class ZMQRolloutGateway:
         force: bool = False,
     ) -> None:
         """Refresh desktop-pool capacity from the backend status directory."""
-        assert backend.status_dir, (
-            "GatewayBackend.status_dir is required (enforced in "
-            "ZMQRolloutGateway.__init__); a gateway backend with no status dir "
-            "would report capacity_ready unconditionally and route to it blind"
-        )
         current = time.monotonic() if now is None else now
         if (
             not force
@@ -645,10 +635,6 @@ class ZMQRolloutGateway:
 
     def reserve_backend_capacity(self, backend: GatewayBackend) -> bool:
         """Reserve one observed ready desktop slot after routing a request."""
-        assert backend.status_dir, (
-            "GatewayBackend.status_dir is required (enforced in "
-            "ZMQRolloutGateway.__init__)"
-        )
         if available_ready_sessions(backend) <= 0:
             return False
         backend.reserved_ready_sessions = min(
