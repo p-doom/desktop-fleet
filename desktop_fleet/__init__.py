@@ -11,6 +11,7 @@ No consumer-specific coupling belongs anywhere but ``desktop_fleet.adapters``.
 
 from __future__ import annotations
 
+from desktop_fleet.node import NodeService, run_node
 from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
@@ -58,6 +59,7 @@ __all__ = [
     "EnvFleetRegistry",
     "EnvServerSpec",
     "FleetRunLayout",
+    "NodeService",
     "ReadinessSummary",
     "SlurmJob",
     "active_worker_statuses",
@@ -78,6 +80,7 @@ __all__ = [
     "resolve_min_ready",
     "resolve_status_dir",
     "run_command",
+    "run_node",
     "scratch_root",
     "select_cancel_job",
     "slurm_job_id_from_registry",

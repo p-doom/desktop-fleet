@@ -68,14 +68,12 @@ def test_registry_upsert_merges_by_server_name(tmp_path):
     json.dumps(registry.as_dict())
 
 
-def hub_descriptor_metadata(node_rank: int) -> dict:
-    """The shape a node-service plugin publishes: one leaf per node, one shared key."""
+def node_service_metadata(node_rank: int) -> dict:
+    """One opaque service subtree with a disjoint leaf per node."""
     return {
         "node_services": {
-            "cua_gym_hub": {
-                "descriptor_paths": {
-                    str(node_rank): f"/runtime/node-{node_rank}/hub.json"
-                }
+            "mock_service": {
+                "nodes": {str(node_rank): {"path": f"/runtime/node-{node_rank}.json"}}
             }
         }
     }
@@ -104,14 +102,14 @@ def test_registry_upsert_keeps_every_node_leaf_of_a_shared_nested_key(tmp_path):
         upsert_registry(
             path=registry_path,
             run_id="run",
-            metadata=hub_descriptor_metadata(node_rank),
+            metadata=node_service_metadata(node_rank),
             servers=node_specs(tmp_path, node_rank, replica_count=2),
         )
 
     registry = read_registry(registry_path)
-    assert registry.metadata["node_services"]["cua_gym_hub"]["descriptor_paths"] == {
-        "0": "/runtime/node-0/hub.json",
-        "1": "/runtime/node-1/hub.json",
+    assert registry.metadata["node_services"]["mock_service"]["nodes"] == {
+        "0": {"path": "/runtime/node-0.json"},
+        "1": {"path": "/runtime/node-1.json"},
     }
 
 
@@ -125,7 +123,7 @@ def test_registry_upsert_serializes_concurrent_node_writers(tmp_path):
 
     def publish(node_rank: int) -> None:
         specs = node_specs(tmp_path, node_rank, replica_count=node_count)
-        metadata = hub_descriptor_metadata(node_rank)
+        metadata = node_service_metadata(node_rank)
         start.wait()
         try:
             for _ in range(rounds):
@@ -152,8 +150,8 @@ def test_registry_upsert_serializes_concurrent_node_writers(tmp_path):
     assert [server.name for server in registry.servers] == [
         f"osworld-{node_rank:04d}" for node_rank in range(node_count)
     ]
-    assert registry.metadata["node_services"]["cua_gym_hub"]["descriptor_paths"] == {
-        str(node_rank): f"/runtime/node-{node_rank}/hub.json"
+    assert registry.metadata["node_services"]["mock_service"]["nodes"] == {
+        str(node_rank): {"path": f"/runtime/node-{node_rank}.json"}
         for node_rank in range(node_count)
     }
 
