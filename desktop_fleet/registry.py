@@ -116,7 +116,7 @@ def upsert_registry(
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         if path.exists():
             registry = read_registry(path)
-            registry.metadata.update(dict(metadata))
+            _merge_metadata(registry.metadata, metadata)
         else:
             registry = EnvFleetRegistry.empty(run_id=run_id, metadata=metadata)
 
@@ -127,6 +127,22 @@ def upsert_registry(
         registry.updated_at = time.time()
         _write_registry(path, registry)
         return registry
+
+
+def _merge_metadata(target: dict[str, Any], values: Mapping[str, Any]) -> None:
+    """Merge independently published per-node metadata without dropping siblings.
+
+    Nodes publish disjoint leaves of a shared nested key -- node ``n`` writes
+    only its own entry under ``node_services.<service>.<field>.<n>`` -- so a
+    flat ``update()`` at the top level lets the last writer delete every other
+    node's subtree, and those nodes then point at a service that is not theirs.
+    """
+    for key, value in values.items():
+        current = target.get(key)
+        if isinstance(current, dict) and isinstance(value, Mapping):
+            _merge_metadata(current, value)
+        else:
+            target[key] = value
 
 
 def _write_registry(path: Path, registry: EnvFleetRegistry) -> None:

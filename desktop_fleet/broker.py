@@ -52,6 +52,9 @@ NO_BACKEND_CAPACITY_TIMEOUT_ERROR = (
 )
 PENDING_QUEUE_FULL_ERROR = "Env-server desktop capacity queue is full"
 REQUEST_TIMEOUT_ERROR = "Env-server replica did not answer before gateway timeout"
+BACKEND_HEALTH_TIMEOUT_ERROR = (
+    "Env-server replica stopped responding to gateway health checks"
+)
 DispatchStatus = Literal["sent", "no_capacity", "no_live_backend"]
 
 LOG_LEVELS = {
@@ -400,6 +403,25 @@ class ZMQRolloutGateway:
                 failed_response_bytes(error),
             )
 
+    async def fail_backend_routes(
+        self,
+        backend: GatewayBackend,
+        error: str,
+    ) -> None:
+        """Fail requests routed to a backend that is known to be unavailable."""
+        routes = [
+            route
+            for route in self.routes_by_frontend.values()
+            if route.backend_index == backend.index
+        ]
+        for route in routes:
+            self.drop_route(route)
+            await self.send_frontend_response(
+                route.frontend_client_id,
+                route.frontend_request_id,
+                failed_response_bytes(f"{error}: {backend.address}"),
+            )
+
     async def handle_backend_message(
         self,
         backend: GatewayBackend,
@@ -538,7 +560,11 @@ class ZMQRolloutGateway:
             ):
                 backend.pending_health = False
                 backend.healthy = False
-                backend.last_error = "health check timed out"
+                backend.last_error = BACKEND_HEALTH_TIMEOUT_ERROR
+                # A route to a backend that stopped answering health checks will
+                # never complete; leave it and the frontend waits out the whole
+                # request timeout behind a backend already known to be dead.
+                await self.fail_backend_routes(backend, BACKEND_HEALTH_TIMEOUT_ERROR)
             if backend.pending_health:
                 continue
             if now - backend.last_probe_at < self.health_check_interval:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import desktop_fleet.supervise as supervise_module
+from desktop_fleet.local_runtime import LOCAL_RUNTIME_OWNER_FILE, local_runtime_scope
 from desktop_fleet.registry import upsert_registry
 from desktop_fleet.slurm import SlurmJob
 from desktop_fleet.spec import (
@@ -26,10 +28,14 @@ from desktop_fleet.supervise import (
     PoolHealth,
     ReplicaRuntime,
     SupervisorPolicy,
+    _remove_local_runtime_root,
+    _validate_local_runtime_root,
+    _write_local_runtime_owner,
     build_prefetch_command,
     build_sbatch_command,
     default_asset_cache_dir,
     default_task_base_path,
+    enforce_vm_memory_budget,
     env_value,
     expected_ready_sessions,
     format_status_report,
@@ -42,6 +48,7 @@ from desktop_fleet.supervise import (
     parse_fleet_args,
     parse_prepare_args,
     parse_sbatch_job_id,
+    prepare_main,
     process_group_alive,
     read_pool_health,
     registry_metadata,
@@ -54,6 +61,14 @@ from desktop_fleet.supervise import (
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
     monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+
+
+@pytest.fixture(autouse=True)
+def local_runtime_env(monkeypatch, tmp_path):
+    """The supervisor derives its node-local runtime root from the allocation."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path.resolve()))
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
+    monkeypatch.setenv("SLURM_PROCID", "0")
 
 
 def test_prepare_harness_config_includes_desktop_pool(tmp_path):
@@ -1041,3 +1056,253 @@ def test_env_value_rejects_a_malformed_environment_override():
     assert env_value({}, "OSWORLD_ENV_SERVERS_PER_NODE", int, 1) == 1
     with pytest.raises(ValueError, match="OSWORLD_ENV_SERVERS_PER_NODE"):
         env_value({"OSWORLD_ENV_SERVERS_PER_NODE": "8x"}, "OSWORLD_ENV_SERVERS_PER_NODE", int, 1)
+
+
+def _runtime_root(tmp_path):
+    return tmp_path.resolve() / "desktop-fleet-12345" / "node-0" / "desktop-runtime"
+
+
+def test_supervisor_runtime_root_startup_and_shutdown_cleanup(tmp_path):
+    runtime_root = _validate_local_runtime_root(_runtime_root(tmp_path))
+    supervisor = object.__new__(FleetSupervisor)
+    supervisor.local_runtime_root = runtime_root
+    supervisor.logger = logging.getLogger("test-supervisor-runtime-cleanup")
+
+    supervisor.prepare_local_runtime_root()
+    stale = runtime_root / "runtime" / "stale.qcow2"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("stale", encoding="utf-8")
+    supervisor.prepare_local_runtime_root()
+
+    assert runtime_root.is_dir()
+    assert not stale.exists()
+    assert {path.name for path in runtime_root.iterdir()} == {LOCAL_RUNTIME_OWNER_FILE}
+    (runtime_root / "new-runtime").mkdir()
+
+    supervisor.cleanup_local_runtime_root()
+
+    assert not runtime_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"TMPDIR": None}, "TMPDIR must be set"),
+        ({"SLURM_JOB_ID": None}, "SLURM_JOB_ID must be set"),
+        ({"TMPDIR": "relative/base"}, "must be absolute"),
+        ({"SLURM_JOB_ID": "../escape"}, "Invalid SLURM_JOB_ID"),
+        ({"SLURM_PROCID": "node-one"}, "Invalid SLURM_PROCID"),
+        ({"SLURM_PROCID": "-1"}, "Invalid SLURM_PROCID"),
+    ],
+)
+def test_local_runtime_scope_rejects_a_base_it_cannot_own(overrides, match):
+    """Nothing derived from a bad base may reach rmtree, so reject it here."""
+    env = {"TMPDIR": "/scratch/local", "SLURM_JOB_ID": "12345", "SLURM_PROCID": "0"}
+    env.update(overrides)
+
+    with pytest.raises(RuntimeError, match=match):
+        local_runtime_scope({k: v for k, v in env.items() if v is not None})
+
+
+def test_supervisor_run_owns_the_runtime_root_across_the_whole_lifecycle(
+    tmp_path, monkeypatch, recorded_signals
+):
+    """The root must exist before the first replica and be gone after the last."""
+    monkeypatch.setattr(signal, "signal", lambda *args, **kwargs: None)
+    policy = SupervisorPolicy(
+        poll_s=0.0,
+        startup_grace_s=1000.0,
+        replica_unhealthy_s=1000.0,
+        failure_window_s=300.0,
+        max_failures_per_window=0,
+        restart_backoff_s=10.0,
+        fleet_unhealthy_s=1000.0,
+        max_fleet_restarts=3,
+        terminate_timeout_s=1.0,
+        status_stale_after_s=120.0,
+    )
+    supervisor = _build_supervisor(tmp_path, policy=policy)
+    runtime_root = supervisor.local_runtime_root
+    # what a requeued incarnation of this same job finds on the node
+    runtime_root.mkdir(parents=True)
+    _write_local_runtime_owner(runtime_root)
+    stale = runtime_root / "stale.qcow2"
+    stale.write_text("stale", encoding="utf-8")
+
+    owned_at_spawn: list[bool] = []
+
+    def fake_spawn(command, log_path):
+        owned_at_spawn.append(
+            (runtime_root / LOCAL_RUNTIME_OWNER_FILE).is_file() and not stale.exists()
+        )
+        return _FakeProcess(returncode=None)
+
+    monkeypatch.setattr(supervisor, "spawn", fake_spawn)
+    monkeypatch.setattr(
+        time, "sleep", lambda seconds: setattr(supervisor, "stop_requested", True)
+    )
+
+    assert supervisor.run() == 0
+    assert owned_at_spawn == [True]
+    assert not runtime_root.exists()
+
+
+def test_supervisor_runtime_root_cleanup_refuses_unowned_directory(tmp_path):
+    runtime_root = _runtime_root(tmp_path)
+    runtime_root.mkdir(parents=True)
+    marker = runtime_root / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unowned local runtime root"):
+        _remove_local_runtime_root(runtime_root)
+
+    assert marker.exists()
+
+
+def test_supervisor_runtime_root_cleanup_refuses_mismatched_owner(tmp_path):
+    runtime_root = _runtime_root(tmp_path)
+    runtime_root.mkdir(parents=True)
+    owner = runtime_root / LOCAL_RUNTIME_OWNER_FILE
+    owner.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_id": "another-job",
+                "node_rank": 0,
+                "runtime_root": str(runtime_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="does not match this task"):
+        _remove_local_runtime_root(runtime_root)
+
+    assert runtime_root.exists()
+
+
+def test_supervisor_runtime_root_cleanup_refuses_symlink(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    marker = target / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    link = _runtime_root(tmp_path)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="symlink in local runtime ownership path"):
+        _remove_local_runtime_root(link)
+
+    assert link.is_symlink()
+    assert marker.exists()
+
+
+def test_supervisor_runtime_root_cleanup_refuses_symlinked_job_root(tmp_path):
+    target = tmp_path / "target"
+    runtime_root = target / "node-0" / "desktop-runtime"
+    runtime_root.mkdir(parents=True)
+    marker = runtime_root / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    job_root = tmp_path.resolve() / "desktop-fleet-12345"
+    job_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="symlink in local runtime ownership path"):
+        _remove_local_runtime_root(job_root / "node-0" / "desktop-runtime")
+
+    assert marker.exists()
+
+
+def test_supervisor_shutdown_cleanup_failure_is_nonfatal(tmp_path, monkeypatch):
+    supervisor = object.__new__(FleetSupervisor)
+    supervisor.local_runtime_root = tmp_path / "runtime"
+    supervisor.logger = logging.getLogger("test-supervisor-runtime-cleanup-failure")
+
+    def fail_cleanup(_path):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(supervise_module, "_remove_local_runtime_root", fail_cleanup)
+
+    supervisor.cleanup_local_runtime_root()
+
+
+def test_prepare_refuses_a_node_whose_allocation_cannot_hold_its_desktops(
+    monkeypatch, tmp_path
+):
+    """The budget must fire before prepare creates the run's directories."""
+    monkeypatch.setattr(sys, "argv", ["desktop-fleet", "prepare"])
+    monkeypatch.setenv("OSWORLD_RUN_BASE", str(tmp_path))
+    monkeypatch.setenv("OSWORLD_FLEET_RUN_ID", "run-oversubscribed")
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "131072")
+    monkeypatch.delenv("OSWORLD_DESKTOP_VM_HOST_MEM_GB", raising=False)
+    for name in (
+        "OSWORLD_FLEET_RUN_ROOT",
+        "OSWORLD_ENV_FLEET_REGISTRY",
+        "OSWORLD_DESKTOP_POOL_ROOT",
+        "OSWORLD_DESKTOP_POOL_STATUS_DIR",
+        "OSWORLD_FLEET_LOGS_DIR",
+        "OSWORLD_FLEET_CONFIGS_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match="8 desktop VMs"):
+        prepare_main(["--servers-per-node", "1", "--workers-per-server", "8"])
+
+    assert not (tmp_path / "run-oversubscribed").exists()
+
+
+def test_vm_memory_budget_accepts_an_allocation_that_fits():
+    enforce_vm_memory_budget(
+        {"SLURM_MEM_PER_NODE": "262144"},
+        servers_per_node=1,
+        workers_per_server=8,
+        min_ready_sessions=1,
+    )
+
+
+def test_vm_memory_budget_rejects_an_allocation_too_small_for_the_planned_vms():
+    with pytest.raises(ValueError) as excinfo:
+        enforce_vm_memory_budget(
+            {"SLURM_MEM_PER_NODE": "131072"},
+            servers_per_node=1,
+            workers_per_server=8,
+            min_ready_sessions=1,
+        )
+
+    message = str(excinfo.value)
+    assert "8 desktop VMs" in message
+    assert "1 servers x 8 workers x 1 ready sessions" in message
+    assert "200 GB" in message
+    assert "25 GB per VM" in message
+    assert "128 GB" in message
+    assert "OSWORLD_FLEET_SLURM_MEM_PER_NODE" in message
+    assert "OSWORLD_ENV_WORKERS_PER_SERVER" in message
+    assert "OSWORLD_DESKTOP_POOL_MIN_READY_SESSIONS" in message
+    assert "OSWORLD_DESKTOP_VM_HOST_MEM_GB" in message
+
+
+def test_vm_memory_budget_derives_the_allocation_from_memory_per_cpu():
+    with pytest.raises(ValueError, match="96 GB"):
+        enforce_vm_memory_budget(
+            {"SLURM_MEM_PER_CPU": "3072", "SLURM_CPUS_ON_NODE": "32"},
+            servers_per_node=1,
+            workers_per_server=8,
+            min_ready_sessions=1,
+        )
+
+
+def test_vm_memory_budget_skips_without_a_slurm_memory_allocation():
+    enforce_vm_memory_budget(
+        {},
+        servers_per_node=4,
+        workers_per_server=8,
+        min_ready_sessions=4,
+    )
+
+
+def test_vm_memory_budget_honors_the_per_vm_estimate_override():
+    enforce_vm_memory_budget(
+        {"SLURM_MEM_PER_NODE": "131072", "OSWORLD_DESKTOP_VM_HOST_MEM_GB": "16"},
+        servers_per_node=1,
+        workers_per_server=8,
+        min_ready_sessions=1,
+    )

@@ -43,6 +43,7 @@ it desktop-fleet adds:
 | `desktop_fleet/spec.py` | `EnvServerSpec`, `FleetRunLayout`, path/env helpers, verifiers env-server TOML rendering |
 | `desktop_fleet/registry.py` | the durable, `flock`-protected fleet registry |
 | `desktop_fleet/slurm.py` | Slurm identity, `NodeAddr` resolution, `squeue`/`scancel` guards |
+| `desktop_fleet/local_runtime.py` | the node-local runtime root this task owns, wipes, and removes |
 | `desktop_fleet/readiness.py` | status-file capacity accounting + the readiness gate CLI |
 | `desktop_fleet/supervise.py` | `prepare` / `run` / `submit` / `status` / `cancel` |
 | `desktop_fleet/broker.py` | cross-node, capacity-aware ZMQ rollout broker |

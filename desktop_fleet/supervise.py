@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,6 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+from desktop_fleet.local_runtime import (
+    LOCAL_RUNTIME_OWNER_FILE,
+    LocalRuntimeScope,
+    local_runtime_scope,
+)
 from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
@@ -49,6 +55,7 @@ from desktop_fleet.slurm import (
     query_squeue,
     select_cancel_job,
     slurm_job_id_from_registry,
+    slurm_memory_gb,
     slurm_metadata,
     slurm_node_addrs,
 )
@@ -279,6 +286,12 @@ PREPARE_OPTIONS: tuple[Opt, ...] = (
 
 def prepare_main(argv: Sequence[str] | None = None) -> int:
     args = parse_prepare_args(argv)
+    enforce_vm_memory_budget(
+        os.environ,
+        servers_per_node=args.servers_per_node,
+        workers_per_server=args.workers_per_server,
+        min_ready_sessions=args.desktop_pool_min_ready_sessions,
+    )
     layout = resolve_prepare_layout(args)
     args.run_root = layout.run_root
     args.registry = layout.registry_path
@@ -514,6 +527,38 @@ def split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def enforce_vm_memory_budget(
+    env: Mapping[str, str],
+    *,
+    servers_per_node: int,
+    workers_per_server: int,
+    min_ready_sessions: int,
+) -> None:
+    """Refuse a node whose Slurm memory cannot hold the desktops it plans.
+
+    Every warm session is a whole QEMU guest, so the requirement is the product
+    of the three counts, not any one of them. Unchecked, the node starts, boots
+    desktops until the cgroup OOM-kills one, and reports it as a flaky pool.
+    """
+    available_gb = slurm_memory_gb(env)
+    if available_gb is None:
+        return
+    vm_mem_gb = int(env.get("OSWORLD_DESKTOP_VM_HOST_MEM_GB") or "25")
+    planned_vms = servers_per_node * workers_per_server * min_ready_sessions
+    required_gb = planned_vms * vm_mem_gb
+    if required_gb > available_gb:
+        raise ValueError(
+            f"this fleet node plans {planned_vms} desktop VMs "
+            f"({servers_per_node} servers x {workers_per_server} workers x "
+            f"{min_ready_sessions} ready sessions) needing {required_gb} GB "
+            f"at {vm_mem_gb} GB per VM, but its Slurm allocation is "
+            f"{available_gb} GB; raise OSWORLD_FLEET_SLURM_MEM_PER_NODE / the "
+            f"fleet sbatch --mem, lower OSWORLD_ENV_WORKERS_PER_SERVER or "
+            f"OSWORLD_DESKTOP_POOL_MIN_READY_SESSIONS, or set "
+            f"OSWORLD_DESKTOP_VM_HOST_MEM_GB for genuinely smaller VMs"
+        )
+
+
 def expected_ready_sessions(args: argparse.Namespace, replica_count: int) -> int:
     """Compute the mandatory warm sessions required before consumer launch."""
     return (
@@ -644,6 +689,71 @@ def parse_supervise_args(argv: Sequence[str] | None = None) -> argparse.Namespac
     return parser.parse_args(argv)
 
 
+def _validate_local_runtime_root(path: Path) -> Path:
+    """Accept only the derived job- and node-owned root, and only unsymlinked.
+
+    Every destructive step below goes through here first: a root reached via a
+    symlink at any level, or one that is not the path this task derives for
+    itself, is somebody else's directory.
+    """
+    scope = local_runtime_scope(os.environ)
+    candidate = Path(os.path.abspath(path))
+    if candidate != scope.runtime_root:
+        raise RuntimeError(
+            "local runtime root must exactly match the derived job- and "
+            f"node-owned root ({scope.runtime_root}), got {path}"
+        )
+    _refuse_symlinked_runtime_scope(scope)
+    return candidate
+
+
+def _refuse_symlinked_runtime_scope(scope: LocalRuntimeScope) -> None:
+    for candidate in (scope.job_root, scope.node_root, scope.runtime_root):
+        if candidate.is_symlink():
+            raise RuntimeError(
+                f"Refusing symlink in local runtime ownership path: {candidate}"
+            )
+
+
+def _runtime_owner_path(path: Path) -> Path:
+    return path / LOCAL_RUNTIME_OWNER_FILE
+
+
+def _write_local_runtime_owner(path: Path) -> None:
+    validated = _validate_local_runtime_root(path)
+    write_json_atomic(
+        _runtime_owner_path(validated),
+        local_runtime_scope(os.environ).owner_payload,
+    )
+
+
+def _require_local_runtime_owner(path: Path) -> None:
+    marker = _runtime_owner_path(path)
+    if marker.is_symlink() or not marker.is_file():
+        raise RuntimeError(f"Refusing to remove unowned local runtime root: {path}")
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Invalid local runtime ownership marker: {marker}"
+        ) from error
+    expected = local_runtime_scope(os.environ).owner_payload
+    if payload != expected:
+        raise RuntimeError(
+            f"Local runtime ownership marker does not match this task: {marker}"
+        )
+
+
+def _remove_local_runtime_root(path: Path) -> None:
+    validated = _validate_local_runtime_root(path)
+    if not validated.exists():
+        return
+    if not validated.is_dir():
+        raise RuntimeError(f"Refusing to remove non-directory runtime root: {validated}")
+    _require_local_runtime_owner(validated)
+    shutil.rmtree(validated)
+
+
 class FleetSupervisor:
     def __init__(self, *, args: argparse.Namespace, policy: SupervisorPolicy):
         self.args = args
@@ -657,12 +767,14 @@ class FleetSupervisor:
         self.run_root = args.run_root or args.registry.parent
         self.status_path = args.logs_dir / "supervisor_status.json"
         self.unrecoverable_path = self.run_root / "fleet_unrecoverable.json"
+        self.local_runtime_root = local_runtime_scope(os.environ).runtime_root
         self.replicas = self.load_replicas()
 
     def run(self) -> int:
         self.args.logs_dir.mkdir(parents=True, exist_ok=True)
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.install_signal_handlers()
+        self.prepare_local_runtime_root()
 
         try:
             self.start_replicas(self.replicas, reason="initial start")
@@ -681,7 +793,30 @@ class FleetSupervisor:
             self.stop_gateway()
             self.stop_replicas(self.replicas)
             self.write_status(time.monotonic())
+            self.cleanup_local_runtime_root()
         return 0
+
+    def prepare_local_runtime_root(self) -> None:
+        """Remove stale allocation state before starting any replica."""
+        try:
+            _remove_local_runtime_root(self.local_runtime_root)
+            self.local_runtime_root.mkdir(parents=True)
+            _write_local_runtime_owner(self.local_runtime_root)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to clean local runtime root before starting replicas: "
+                f"{self.local_runtime_root}"
+            ) from exc
+
+    def cleanup_local_runtime_root(self) -> None:
+        """Best-effort removal after every owned process group has stopped."""
+        try:
+            _remove_local_runtime_root(self.local_runtime_root)
+        except Exception:
+            self.logger.exception(
+                "Failed to remove local runtime root during shutdown: %s",
+                self.local_runtime_root,
+            )
 
     def install_signal_handlers(self) -> None:
         def request_stop(_signum: int, _frame: Any) -> None:
