@@ -7,17 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from desktop_fleet.readiness import int_metadata, readiness_summary
+from desktop_fleet.readiness import int_metadata, parse_args, readiness_summary
 from desktop_fleet.registry import upsert_registry
 from desktop_fleet.spec import FleetRunLayout, make_server_specs
 
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
-def test_readiness_aggregates_registry_and_pool_status(tmp_path):
+def test_readiness_aggregates_registry_and_pool_status(tmp_path, environment_metadata):
     registry_path = tmp_path / "registry.json"
     server = make_server_specs(
         host="node001",
@@ -37,6 +37,7 @@ def test_readiness_aggregates_registry_and_pool_status(tmp_path):
         path=registry_path,
         run_id="run",
         metadata={
+            **environment_metadata,
             "expected_env_servers": 1,
             "expected_ready_sessions": 2,
         },
@@ -62,7 +63,6 @@ def test_readiness_aggregates_registry_and_pool_status(tmp_path):
             registry=registry_path,
             status_dir=status_dir,
             pool_status_dir=status_dir,
-            min_ready_sessions=-1,
             expected_servers=0,
             status_stale_after_s=120.0,
         )
@@ -74,7 +74,10 @@ def test_readiness_aggregates_registry_and_pool_status(tmp_path):
     assert summary["server_summaries"][0]["ready"] == 2
 
 
-def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
+def test_readiness_derives_status_dir_from_registry_layout(
+    tmp_path,
+    environment_metadata,
+):
     layout = FleetRunLayout.for_run(
         run_id="run",
         run_base=tmp_path / "osworld_rl",
@@ -97,6 +100,7 @@ def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
         path=layout.registry_path,
         run_id="run",
         metadata={
+            **environment_metadata,
             "layout": layout.as_metadata(),
             "expected_env_servers": 1,
             "expected_ready_sessions": 1,
@@ -125,7 +129,6 @@ def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
             registry=layout.registry_path,
             status_dir=None,
             pool_status_dir=layout.pool_status_dir,
-            min_ready_sessions=-1,
             expected_servers=0,
             status_stale_after_s=120.0,
         )
@@ -143,7 +146,10 @@ def test_readiness_derives_status_dir_from_registry_layout(tmp_path):
     assert summary["server_summaries"][0]["total_failed"] == 3
 
 
-def test_readiness_summary_ignores_stale_status_files(tmp_path):
+def test_readiness_summary_ignores_stale_status_files(
+    tmp_path,
+    environment_metadata,
+):
     layout = FleetRunLayout.for_run(
         run_id="run",
         run_base=tmp_path / "osworld_rl",
@@ -166,6 +172,7 @@ def test_readiness_summary_ignores_stale_status_files(tmp_path):
         path=layout.registry_path,
         run_id="run",
         metadata={
+            **environment_metadata,
             "layout": layout.as_metadata(),
             "expected_env_servers": 1,
             "expected_ready_sessions": 1,
@@ -189,7 +196,6 @@ def test_readiness_summary_ignores_stale_status_files(tmp_path):
             registry=layout.registry_path,
             status_dir=None,
             pool_status_dir=layout.pool_status_dir,
-            min_ready_sessions=-1,
             expected_servers=0,
             status_stale_after_s=120.0,
         )
@@ -205,3 +211,8 @@ def test_int_metadata_rejects_a_malformed_registry_value():
     assert int_metadata({}, "expected_ready_sessions", default=7) == 7
     with pytest.raises(ValueError, match="expected_ready_sessions"):
         int_metadata({"expected_ready_sessions": "lots"}, "expected_ready_sessions", default=7)
+
+
+def test_readiness_has_no_independent_ready_threshold():
+    with pytest.raises(SystemExit):
+        parse_args(["--min-ready-sessions", "2"])

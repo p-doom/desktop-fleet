@@ -9,15 +9,17 @@ along opaquely in :attr:`FleetRunLayout.consumer_paths`.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
 from collections.abc import Callable, Mapping, MutableMapping
-from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Self
+
+import tomli_w
+
+from desktop_fleet.environment import EnvironmentSession, inject_status_dir
 
 # Keep the shared desktop-pool path component short as a fallback; QEMU AF_UNIX
 # socket paths should use DesktopPoolConfig.runtime_dir when available.
@@ -78,7 +80,7 @@ def load_runtime_env_file(
 
     A variable already present in ``env`` wins.  This runs before argparse, so
     every ``Opt`` with an environment name reads it: overwriting would make
-    ``OSWORLD_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...`` lose
+    ``ENV_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...`` lose
     silently to whatever the file happens to say.
     """
     resolved = _runtime_env_file_path(env=env, path=path)
@@ -96,11 +98,11 @@ def _runtime_env_file_path(
 ) -> Path | None:
     if path is not None:
         return require_absolute_path(path, name="runtime env file path")
-    explicit = env.get("RL_RUNTIME_ENV_FILE")
+    explicit = env.get("ENV_FLEET_RUNTIME_ENV_FILE")
     if explicit is not None:
         if not explicit:
             return None
-        return require_absolute_path(explicit, name="RL_RUNTIME_ENV_FILE")
+        return require_absolute_path(explicit, name="ENV_FLEET_RUNTIME_ENV_FILE")
     return project_root(env) / ".env"
 
 
@@ -129,7 +131,7 @@ class EnvServerSpec:
     replica_count: int
     config_path: str
     log_path: str
-    pool_status_dir: str | None = None
+    pool_status_dir: str
 
 
 def default_public_host(
@@ -139,7 +141,7 @@ def default_public_host(
     fqdn_func: Callable[[], str] = socket.getfqdn,
     hostname_func: Callable[[], str] = socket.gethostname,
 ) -> str:
-    if explicit_host := env.get("OSWORLD_FLEET_HOST"):
+    if explicit_host := env.get("ENV_FLEET_HOST"):
         return explicit_host
 
     if slurm_host := _slurm_node_address(
@@ -165,16 +167,14 @@ def make_server_specs(
     name_prefix: str,
     config_dir: Path,
     log_dir: Path,
-    pool_status_root: Path | None = None,
+    pool_status_root: Path,
 ) -> list[EnvServerSpec]:
     specs: list[EnvServerSpec] = []
     for local_index in range(servers_per_node):
         replica_index = replica_offset + local_index
         port = base_port + node_rank * servers_per_node + local_index
         name = f"{name_prefix}-{replica_index:04d}"
-        pool_status_dir = (
-            str(Path(pool_status_root) / name) if pool_status_root is not None else None
-        )
+        pool_status_dir = str(pool_status_root / name)
         specs.append(
             EnvServerSpec(
                 name=name,
@@ -317,25 +317,25 @@ class FleetRunLayout:
         run_id: str | None = None,
         run_base: str | Path | None = None,
     ) -> Self:
-        resolved_run_id = run_id or env.get("OSWORLD_FLEET_RUN_ID") or slurm_run_id(env)
+        resolved_run_id = run_id or env.get("ENV_FLEET_RUN_ID") or slurm_run_id(env)
         if run_base is not None:
             resolved_run_base = require_absolute_path(run_base, name="run_base")
-        elif env.get("OSWORLD_RUN_BASE"):
+        elif env.get("ENV_FLEET_RUN_BASE"):
             resolved_run_base = require_absolute_path(
-                env["OSWORLD_RUN_BASE"],
-                name="OSWORLD_RUN_BASE",
+                env["ENV_FLEET_RUN_BASE"],
+                name="ENV_FLEET_RUN_BASE",
             )
         else:
             resolved_run_base = scratch_root(env)
         return cls.for_run(
             run_id=resolved_run_id,
             run_base=resolved_run_base,
-            run_root=env_path(env, "OSWORLD_FLEET_RUN_ROOT"),
-            registry_path=env_path(env, "OSWORLD_ENV_FLEET_REGISTRY"),
-            pool_root=env_path(env, "OSWORLD_DESKTOP_POOL_ROOT"),
-            pool_status_dir=env_path(env, "OSWORLD_DESKTOP_POOL_STATUS_DIR"),
-            logs_dir=env_path(env, "OSWORLD_FLEET_LOGS_DIR"),
-            configs_dir=env_path(env, "OSWORLD_FLEET_CONFIGS_DIR"),
+            run_root=env_path(env, "ENV_FLEET_RUN_ROOT"),
+            registry_path=env_path(env, "ENV_FLEET_REGISTRY"),
+            pool_root=env_path(env, "ENV_FLEET_DESKTOP_POOL_ROOT"),
+            pool_status_dir=env_path(env, "ENV_FLEET_DESKTOP_POOL_STATUS_DIR"),
+            logs_dir=env_path(env, "ENV_FLEET_LOGS_DIR"),
+            configs_dir=env_path(env, "ENV_FLEET_CONFIGS_DIR"),
             consumer_paths=parse_consumer_paths(env.get(CONSUMER_PATHS_ENV)),
         )
 
@@ -469,68 +469,36 @@ def env_path(env: Mapping[str, str], name: str) -> Path | None:
 
 def write_env_server_config(
     spec: EnvServerSpec,
-    args: Any,
-    metadata: Mapping[str, Any],
+    session: EnvironmentSession,
 ) -> None:
     """Render the ``verifiers`` env-server TOML for one replica."""
-    harness = deepcopy(metadata["harness"])
-    if spec.pool_status_dir:
-        desktop = harness.setdefault("desktop", {})
-        pool_config = desktop.setdefault("desktop_pool_config", {})
-        pool_config["status_dir"] = spec.pool_status_dir
-    taskset = {
-        "id": args.env_id,
-        "base_path": str(args.task_base_path),
-        "max_tasks": args.max_tasks,
-        "shuffle_seed": args.shuffle_seed,
-    }
-    harness["id"] = args.env_id
+    harness = inject_status_dir(
+        session.harness,
+        session.status_dir_path,
+        spec.pool_status_dir,
+    )
     payload = {
-        "output_dir": str(args.run_root / "server_output"),
+        "output_dir": str(session.output_dir),
         "log": {"level": "INFO"},
         "env": {
             "name": spec.name,
-            "address": spec.bind_address,
-            "taskset": taskset,
-            "harness": harness,
-            "pool": {"type": "static", "num_workers": spec.num_workers},
-            "timeout": {"rollout": args.rollout_timeout},
-            "retries": {"rollout": {"max_retries": args.env_max_retries}},
-            "max_turns": args.max_steps,
+            "env": {
+                "taskset": dict(session.taskset),
+                "agent": {
+                    "harness": harness,
+                    "timeout": {"rollout": session.rollout_timeout},
+                    "retries": {"max_retries": session.max_retries},
+                    "max_turns": session.max_turns,
+                },
+            },
+            "serve": {
+                "address": spec.bind_address,
+                "pool": {"type": "static", "num_workers": spec.num_workers},
+            },
         },
     }
     Path(spec.config_path).write_text(to_toml(payload), encoding="utf-8")
 
 
 def to_toml(payload: Mapping[str, Any]) -> str:
-    lines: list[str] = []
-    scalar_items = {
-        key: value for key, value in payload.items() if not isinstance(value, Mapping)
-    }
-    for key, value in scalar_items.items():
-        lines.append(f"{key} = {toml_literal(value)}")
-    for section, value in payload.items():
-        if not isinstance(value, Mapping):
-            continue
-        lines.append("")
-        lines.append(f"[{section}]")
-        for key, item in value.items():
-            lines.append(f"{key} = {toml_literal(item)}")
-    return "\n".join(lines).strip() + "\n"
-
-
-def toml_literal(value: Any) -> str:
-    if isinstance(value, str):
-        return json.dumps(value)
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return str(value)
-    if isinstance(value, Mapping):
-        items = ", ".join(
-            f"{key} = {toml_literal(item)}" for key, item in value.items()
-        )
-        return f"{{ {items} }}"
-    if isinstance(value, list):
-        return "[" + ", ".join(toml_literal(item) for item in value) + "]"
-    raise TypeError(f"unsupported TOML value: {value!r}")
+    return tomli_w.dumps(dict(payload))

@@ -9,7 +9,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Protocol
 
-from desktop_fleet.registry import upsert_registry
+from desktop_fleet.registry import read_registry, upsert_registry
 from desktop_fleet.supervise import terminate_replica_process_group
 
 _HEALTH_INTERVAL_S = 2.0
@@ -64,10 +64,11 @@ def run_node(
             raise ValueError("node service registry metadata must not be empty")
 
         subprocess.run(prepare_command, check=True)
+        registry = read_registry(registry_path)
         upsert_registry(
             path=registry_path,
             run_id=run_id,
-            metadata={"node_services": dict(metadata)},
+            metadata={**registry.metadata, "node_services": dict(metadata)},
             servers=(),
         )
         process = subprocess.Popen(node_command, start_new_session=True)

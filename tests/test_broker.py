@@ -39,7 +39,7 @@ from desktop_fleet.supervise import BROKER_MODULE, broker_command
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
 def test_supervisor_spawns_the_in_package_broker_entrypoint():
@@ -89,13 +89,19 @@ def test_broker_resolves_cross_node_backends_from_registry_gateway_metadata(tmp_
     assert gateway_bind_address({}) is None
 
 
-def test_broker_refuses_a_registry_that_declares_no_expected_server_count(tmp_path):
+def test_broker_refuses_a_registry_that_declares_no_expected_server_count(
+    tmp_path,
+    environment_metadata,
+):
     """A defaulted 0 made the quorum check `len(servers) >= 0`, always true."""
     registry_path = tmp_path / "registry.json"
     upsert_registry(
         path=registry_path,
         run_id="12345",
-        metadata={"gateway": {"bind_address": "tcp://0.0.0.0:5204"}},
+        metadata={
+            **environment_metadata,
+            "gateway": {"bind_address": "tcp://0.0.0.0:5204"},
+        },
         servers=make_server_specs(
             host="node001",
             bind_host="0.0.0.0",

@@ -91,7 +91,7 @@ def readiness_summary(args: Any) -> ReadinessSummary:
         now=now,
         stale_after_s=status_stale_after_s,
     )
-    min_ready = resolve_min_ready(args, metadata)
+    min_ready = resolve_min_ready(metadata)
     ready = sum_int_field(active_statuses, "ready")
     starting = sum_int_field(active_statuses, "starting")
     leased = sum_int_field(active_statuses, "leased")
@@ -287,10 +287,7 @@ def summarize_registry_servers(
     return summaries
 
 
-def resolve_min_ready(args: Any, metadata: Mapping[str, Any]) -> int:
-    """Choose the explicit ready threshold or fall back to registry metadata."""
-    if args.min_ready_sessions >= 0:
-        return args.min_ready_sessions
+def resolve_min_ready(metadata: Mapping[str, Any]) -> int:
     return int_metadata(metadata, "expected_ready_sessions", default=1)
 
 
@@ -403,36 +400,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--status-dir",
         type=Path,
         default=(
-            Path(env["OSWORLD_DESKTOP_POOL_STATUS_DIR"])
-            if "OSWORLD_DESKTOP_POOL_STATUS_DIR" in env
+            Path(env["ENV_FLEET_DESKTOP_POOL_STATUS_DIR"])
+            if "ENV_FLEET_DESKTOP_POOL_STATUS_DIR" in env
             else None
         ),
     )
     parser.add_argument(
-        "--min-ready-sessions",
-        type=int,
-        default=int(env.get("OSWORLD_DESKTOP_POOL_MIN_READY_TOTAL", "-1")),
-        help="Ready sessions required. -1 uses registry metadata.",
-    )
-    parser.add_argument(
         "--expected-servers",
         type=int,
-        default=int(env.get("OSWORLD_EXPECTED_ENV_SERVERS", "0")),
+        default=int(env.get("ENV_FLEET_EXPECTED_ENV_SERVERS", "0")),
     )
     parser.add_argument(
         "--status-stale-after-s",
         type=float,
-        default=float(env.get("OSWORLD_STATUS_STALE_AFTER_S", "120")),
+        default=float(env.get("ENV_FLEET_STATUS_STALE_AFTER_S", "120")),
     )
     parser.add_argument(
         "--timeout-s",
         type=float,
-        default=float(env.get("OSWORLD_ENV_FLEET_READY_TIMEOUT", "3600")),
+        default=float(env.get("ENV_FLEET_READY_TIMEOUT", "3600")),
     )
     parser.add_argument(
         "--poll-s",
         type=float,
-        default=float(env.get("OSWORLD_ENV_FLEET_READY_POLL", "5")),
+        default=float(env.get("ENV_FLEET_READY_POLL", "5")),
     )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)

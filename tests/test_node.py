@@ -10,7 +10,7 @@ import pytest
 
 import desktop_fleet.node as node_module
 from desktop_fleet.node import run_node
-from desktop_fleet.registry import read_registry
+from desktop_fleet.registry import read_registry, upsert_registry
 
 
 class RecordingService:
@@ -64,6 +64,15 @@ def service_for_rank(tmp_path: Path, node_rank: int) -> RecordingService:
     )
 
 
+def seed_registry(path: Path, environment_metadata: dict[str, object]) -> None:
+    upsert_registry(
+        path=path,
+        run_id="run",
+        metadata=environment_metadata,
+        servers=(),
+    )
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -92,7 +101,7 @@ def test_invalid_node_contract_fails_before_starting_the_service(
 
 
 def test_node_service_starts_before_preparation_and_is_checked_until_node_exit(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, environment_metadata
 ):
     monkeypatch.setattr(node_module, "_HEALTH_INTERVAL_S", 0.01)
     started = tmp_path / "started"
@@ -104,10 +113,12 @@ def test_node_service_starts_before_preparation_and_is_checked_until_node_exit(
         closed_path=closed,
         metadata={"service": {"nodes": {"0": {"path": "/service.json"}}}},
     )
+    registry_path = tmp_path / "registry.json"
+    seed_registry(registry_path, environment_metadata)
 
     returncode = run_node(
         service,
-        registry_path=tmp_path / "registry.json",
+        registry_path=registry_path,
         run_id="run",
         prepare_command=python_command(
             "from pathlib import Path; "
@@ -132,7 +143,10 @@ def test_node_service_starts_before_preparation_and_is_checked_until_node_exit(
     assert closed.is_file()
 
 
-def test_node_service_failure_terminates_the_node_process_and_closes(tmp_path):
+def test_node_service_failure_terminates_the_node_process_and_closes(
+    tmp_path,
+    environment_metadata,
+):
     node_pid = tmp_path / "node.pid"
     closed = tmp_path / "closed"
     service = RecordingService(
@@ -141,11 +155,13 @@ def test_node_service_failure_terminates_the_node_process_and_closes(tmp_path):
         metadata={"service": {"nodes": {"0": {"path": "/service.json"}}}},
         fail_when_path_exists=node_pid,
     )
+    registry_path = tmp_path / "registry.json"
+    seed_registry(registry_path, environment_metadata)
 
     with pytest.raises(RuntimeError, match="node service failed"):
         run_node(
             service,
-            registry_path=tmp_path / "registry.json",
+            registry_path=registry_path,
             run_id="run",
             prepare_command=python_command("pass"),
             node_command=python_command(
@@ -178,8 +194,27 @@ def test_preparation_failure_closes_the_service_without_publishing_metadata(tmp_
     assert not registry_path.exists()
 
 
-def test_node_writers_preserve_each_others_descriptor_metadata(tmp_path):
+def test_successful_preparation_must_publish_the_shared_registry(tmp_path):
+    service = service_for_rank(tmp_path, 0)
+
+    with pytest.raises(FileNotFoundError):
+        run_node(
+            service,
+            registry_path=tmp_path / "registry.json",
+            run_id="run",
+            prepare_command=python_command("pass"),
+            node_command=python_command("raise AssertionError('must not start')"),
+        )
+
+    assert service.closed_path.is_file()
+
+
+def test_node_writers_preserve_each_others_descriptor_metadata(
+    tmp_path,
+    environment_metadata,
+):
     registry_path = tmp_path / "registry.json"
+    seed_registry(registry_path, environment_metadata)
 
     for node_rank in (0, 1):
         service = service_for_rank(tmp_path, node_rank)

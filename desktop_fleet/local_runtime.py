@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-LOCAL_RUNTIME_TMP_ROOT_ENV = "OSWORLD_DESKTOP_POOL_TMP_ROOT"
+LOCAL_RUNTIME_TMP_ROOT_ENV = "ENV_FLEET_DESKTOP_POOL_TMP_ROOT"
 LOCAL_RUNTIME_OWNER_FILE = ".desktop-fleet-runtime-owner.json"
 
 

@@ -40,12 +40,14 @@ it desktop-fleet adds:
 
 | module | responsibility |
 | --- | --- |
+| `desktop_fleet/environment.py` | the serialized session/source contract, exact status-path injection, and declarative source transformation |
 | `desktop_fleet/spec.py` | `EnvServerSpec`, `FleetRunLayout`, path/env helpers, verifiers env-server TOML rendering |
 | `desktop_fleet/registry.py` | the durable, `flock`-protected fleet registry |
 | `desktop_fleet/slurm.py` | Slurm identity, `NodeAddr` resolution, `squeue`/`scancel` guards |
 | `desktop_fleet/local_runtime.py` | the node-local runtime root this task owns, wipes, and removes |
 | `desktop_fleet/readiness.py` | status-file capacity accounting + the readiness gate CLI |
-| `desktop_fleet/supervise.py` | `prepare` / `run` / `submit` / `status` / `cancel` |
+| `desktop_fleet/supervise.py` | `prepare` / `run` / `launch` / `submit` / `status` / `cancel` |
+| `desktop_fleet/run_env_fleet.sbatch` | the packaged Slurm launcher: one `launch` task per allocated node |
 | `desktop_fleet/broker.py` | cross-node, capacity-aware ZMQ rollout broker |
 | `desktop_fleet/adapters/` | the only place a specific consumer may be named |
 
@@ -66,19 +68,24 @@ Import direction is strictly `adapters -> core`.
 ## Usage
 
 ```bash
+environment_contract=/absolute/path/to/environment.json
+
 # submit the fleet service (with the prime-rl launch hints)
-uv run --no-sync python -m desktop_fleet.adapters.prime_rl submit --dry-run
+uv run --no-sync python -m desktop_fleet.adapters.prime_rl submit --dry-run \
+    --environment-contract "$environment_contract"
 
 # or with no consumer at all
-uv run --no-sync python -m desktop_fleet.supervise submit --nodes 2 --servers-per-node 8
+uv run --no-sync python -m desktop_fleet.supervise submit \
+    --environment-contract "$environment_contract" --nodes 2 --servers-per-node 8
 
-# inside the allocation, per node
-python -m desktop_fleet.supervise prepare
+# submit uses the packaged launcher; for a manual allocation, run once per node
+python -m desktop_fleet.supervise prepare \
+    --environment-contract "$environment_contract" --replica-count 16
 python -m desktop_fleet.supervise run --config-dir ... --logs-dir ... \
     --registry ... --env-server-bin ... --start-gateway
 
 # block until enough machines are warm
-python -m desktop_fleet.readiness --registry "$OSWORLD_ENV_FLEET_REGISTRY"
+python -m desktop_fleet.readiness --registry "$ENV_FLEET_REGISTRY"
 
 # inspect / tear down
 python -m desktop_fleet.supervise status --run-id <run-id>
