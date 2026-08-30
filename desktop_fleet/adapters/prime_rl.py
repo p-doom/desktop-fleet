@@ -4,7 +4,7 @@ desktop-fleet manages machines; prime-rl is one possible consumer of those machi
 Everything prime-rl-shaped lives here:
 
 * the two consumer paths (``prime_rl_config_path``, ``prime_rl_output_dir``) and
-  their ``OSWORLD_PRIME_RL_*`` env names, injected into
+  their ``ENV_FLEET_PRIME_RL_*`` env names, injected into
   :class:`~desktop_fleet.spec.FleetRunLayout` through its opaque ``consumer_paths``
   seam;
 * rendering + validating a prime-rl trainer/orchestrator TOML against a live
@@ -23,11 +23,11 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from desktop_fleet import supervise
+from desktop_fleet.environment import environment_contract_from_registry_metadata
 from desktop_fleet.registry import read_registry
 from desktop_fleet.spec import (
     FleetRunLayout,
@@ -39,8 +39,8 @@ from desktop_fleet.spec import (
 
 CONFIG_PATH_KEY = "prime_rl_config_path"
 OUTPUT_DIR_KEY = "prime_rl_output_dir"
-CONFIG_PATH_ENV = "OSWORLD_PRIME_RL_CONFIG_PATH"
-OUTPUT_DIR_ENV = "OSWORLD_PRIME_RL_OUTPUT_DIR"
+CONFIG_PATH_ENV = "ENV_FLEET_PRIME_RL_CONFIG_PATH"
+OUTPUT_DIR_ENV = "ENV_FLEET_PRIME_RL_OUTPUT_DIR"
 DEFAULT_CONFIG_NAME = "prime_rl_fleet.toml"
 DEFAULT_OUTPUT_NAME = "prime_rl"
 DEFAULT_BASE_CONFIG = Path("configs/prime_rl/multi_node.toml")
@@ -76,7 +76,10 @@ def consumer_paths(
 ) -> dict[str, Path]:
     """Resolve both prime-rl paths, preferring env overrides then layout defaults."""
     resolved = dict(layout.consumer_paths)
-    for key, env_name in ((CONFIG_PATH_KEY, CONFIG_PATH_ENV), (OUTPUT_DIR_KEY, OUTPUT_DIR_ENV)):
+    for key, env_name in (
+        (CONFIG_PATH_KEY, CONFIG_PATH_ENV),
+        (OUTPUT_DIR_KEY, OUTPUT_DIR_ENV),
+    ):
         value = env.get(env_name)
         if value:
             resolved[key] = require_absolute_path(value, name=env_name)
@@ -106,25 +109,37 @@ def render_main(argv: Sequence[str] | None = None) -> int:
 
     args = parse_render_args(argv)
     registry = read_registry(args.registry)
-    if not registry.servers:
-        raise ValueError(f"registry has no env servers: {args.registry}")
+    expected_servers = registry.metadata.get("expected_env_servers")
+    if type(expected_servers) is not int or expected_servers < 1:
+        raise ValueError("registry expected_env_servers must be a positive integer")
+    if len(registry.servers) != expected_servers:
+        raise ValueError(
+            f"registry is incomplete: expected {expected_servers} env servers, "
+            f"found {len(registry.servers)}"
+        )
+    expected_workers = registry.metadata.get("expected_env_workers")
+    if type(expected_workers) is not int or expected_workers < 1:
+        raise ValueError("registry expected_env_workers must be a positive integer")
+    total_workers = sum(server.num_workers for server in registry.servers)
+    if total_workers != expected_workers:
+        raise ValueError(
+            f"registry is incomplete: expected {expected_workers} env workers, "
+            f"found {total_workers}"
+        )
 
     layout = with_prime_rl_paths(resolve_layout(args, registry.metadata))
     output = args.output or config_path(layout)
     resolved_output_dir = args.output_dir or output_dir(layout)
-    total_workers = sum(server.num_workers for server in registry.servers)
 
     config = load_config(args.base_config)
     configure_external_fleet(
         config,
         metadata=registry.metadata,
         output_dir=resolved_output_dir,
-        max_inflight_rollouts=max(
+        max_inflight_episodes=max(
             total_workers * args.inflight_per_worker,
-            args.min_inflight_rollouts,
+            args.min_inflight_episodes,
         ),
-        rollout_timeout=args.rollout_timeout,
-        max_retries=args.max_retries,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as file:
@@ -146,10 +161,8 @@ def parse_render_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--registry", type=Path, default=layout.registry_path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--rollout-timeout", type=float, default=3600.0)
-    parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument("--inflight-per-worker", type=int, default=1)
-    parser.add_argument("--min-inflight-rollouts", type=int, default=1)
+    parser.add_argument("--min-inflight-episodes", type=int, default=1)
     return parser.parse_args(argv)
 
 
@@ -175,21 +188,22 @@ def configure_external_fleet(
     *,
     metadata: Mapping[str, Any],
     output_dir: Path,
-    max_inflight_rollouts: int,
-    rollout_timeout: float,
-    max_retries: int,
+    max_inflight_episodes: int,
 ) -> None:
     orchestrator = require_mapping(config, "orchestrator")
+    if "max_inflight_rollouts" in orchestrator:
+        raise ValueError(
+            "base config orchestrator.max_inflight_rollouts is stale; "
+            "use max_inflight_episodes"
+        )
     train = orchestrator.setdefault("train", {})
     if not isinstance(train, dict):
         raise ValueError("base config orchestrator.train must be a table")
-    train["env"] = [
-        external_env_config(
-            metadata,
-            rollout_timeout=rollout_timeout,
-            max_retries=max_retries,
+    if "env" in train:
+        raise ValueError(
+            "base config orchestrator.train.env is stale; use orchestrator.train.source"
         )
-    ]
+    train["source"] = [external_source_config(metadata)]
     # Substituting a group size disagrees with the one PrimeRL actually samples
     # with, and the inflight cap below is derived from it.
     group_size = orchestrator.get("group_size")
@@ -197,7 +211,7 @@ def configure_external_fleet(
         raise ValueError(
             "base config orchestrator.group_size must be a positive integer"
         )
-    orchestrator["max_inflight_rollouts"] = max(max_inflight_rollouts, group_size)
+    orchestrator["max_inflight_episodes"] = max(max_inflight_episodes, group_size)
     config["output_dir"] = str(output_dir)
     absolutize_slurm_template_path(config)
 
@@ -212,45 +226,21 @@ def absolutize_slurm_template_path(config: dict[str, Any]) -> None:
     slurm["template_path"] = str(path.resolve())
 
 
-def external_env_config(
-    metadata: Mapping[str, Any],
-    *,
-    rollout_timeout: float,
-    max_retries: int,
-) -> dict[str, Any]:
-    env_id = required_string(metadata, "env_id")
-    task_base_path = required_string(metadata, "task_base_path")
-    harness_raw = metadata.get("harness")
-    if not isinstance(harness_raw, Mapping):
-        raise ValueError("registry metadata is missing harness configuration")
-
-    harness = deepcopy(dict(harness_raw))
-    harness["id"] = env_id
-    desktop = harness.setdefault("desktop", {})
-    if not isinstance(desktop, dict):
-        raise ValueError("registry harness.desktop must be a table")
-    pool = desktop.setdefault("desktop_pool_config", {})
-    if not isinstance(pool, dict):
-        raise ValueError("registry desktop_pool_config must be a table")
-    pool["min_ready_sessions"] = 0
-
-    max_steps = harness.get("max_steps")
-    if not isinstance(max_steps, int) or max_steps < 1:
-        raise ValueError("registry harness.max_steps must be a positive integer")
-
+def external_source_config(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    contract = environment_contract_from_registry_metadata(metadata)
+    session = contract.session
     return {
-        "name": required_string(metadata, "env_name_prefix"),
-        "address": gateway_public_address(metadata),
-        "taskset": {
-            "id": env_id,
-            "base_path": task_base_path,
-            "max_tasks": required_int(metadata, "max_tasks"),
-            "shuffle_seed": required_int(metadata, "shuffle_seed"),
+        "name": contract.source.name,
+        "env": {
+            "taskset": dict(session.taskset),
+            "agent": {
+                "harness": contract.source.render_harness(session),
+                "timeout": {"rollout": session.rollout_timeout},
+                "retries": {"max_retries": session.max_retries},
+                "max_turns": session.max_turns,
+            },
         },
-        "harness": harness,
-        "timeout": {"rollout": rollout_timeout},
-        "retries": {"rollout": {"max_retries": max_retries}},
-        "max_turns": max_steps,
+        "serve": {"address": gateway_public_address(metadata)},
     }
 
 
@@ -269,20 +259,6 @@ def require_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     value = config.get(key)
     if not isinstance(value, dict):
         raise ValueError(f"base config {key} must be a table")
-    return value
-
-
-def required_string(values: Mapping[str, Any], key: str) -> str:
-    value = values.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"registry metadata is missing {key}")
-    return value.strip()
-
-
-def required_int(values: Mapping[str, Any], key: str) -> int:
-    value = values.get(key)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"registry metadata is missing {key}")
     return value
 
 
