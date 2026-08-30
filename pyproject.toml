@@ -16,10 +16,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-# The sibling distribution in this repository. Required, not a convenience:
-# PyPI's `desktop` 0.4.2 is a different package with the same name, so a resolve
-# that reaches the index installs that one instead.
-desktop = { path = "..", editable = true }
+# PyPI's `desktop` 0.4.2 is an unrelated package with the same name.
+desktop = { git = "https://github.com/p-doom/desktop.git", rev = "47c08a7379c0fe3d7589298207cd2ff49182d645" }
 
 [project.scripts]
 desktop-fleet = "desktop_fleet.supervise:main"
