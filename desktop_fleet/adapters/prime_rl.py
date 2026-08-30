@@ -44,16 +44,18 @@ OUTPUT_DIR_ENV = "ENV_FLEET_PRIME_RL_OUTPUT_DIR"
 DEFAULT_CONFIG_NAME = "prime_rl_fleet.toml"
 DEFAULT_OUTPUT_NAME = "prime_rl"
 DEFAULT_BASE_CONFIG = Path("configs/prime_rl/multi_node.toml")
-LAUNCHER_SCRIPT = "scripts/prime_rl.py"
 RENDER_MODULE = "desktop_fleet.adapters.prime_rl"
 
 
 def prime_rl_dir(env: Mapping[str, str] = os.environ) -> Path:
-    """Locate the prime-rl checkout that owns the validating interpreter."""
+    """Locate the PrimeRL runtime that owns the parser and launcher."""
     value = env.get("PRIME_RL_DIR")
-    if value:
-        return require_absolute_path(value, name="PRIME_RL_DIR")
-    return project_root(env) / "prime-rl"
+    if not value:
+        raise ValueError("PRIME_RL_DIR is required")
+    path = require_absolute_path(value, name="PRIME_RL_DIR")
+    if not path.is_dir():
+        raise ValueError(f"PRIME_RL_DIR is not a directory: {path}")
+    return path
 
 
 def config_path(layout: FleetRunLayout) -> Path:
@@ -264,27 +266,25 @@ def require_mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def validate_prime_rl_config(path: Path) -> None:
-    root = project_root()
     package_dir = prime_rl_dir()
-    python = package_dir / ".venv" / "bin" / "python"
-    if not python.is_file():
-        raise RuntimeError(
-            "PrimeRL environment is not installed; run "
-            'UV_PROJECT_ENVIRONMENT="$PWD/prime-rl/.venv" '
-            "uv sync --project prime-rl --locked --extra all"
-        )
+    venv = package_dir / ".venv"
+    bin_dir = venv / "bin"
+    python = bin_dir / "python"
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise RuntimeError(f"PrimeRL Python is missing or not executable: {python}")
     code = (
         "import sys, tomllib; "
         "from prime_rl.configs.rl import RLConfig; "
         "RLConfig.model_validate(tomllib.load(open(sys.argv[1], 'rb')))"
     )
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(root), env.get("PYTHONPATH", "")) if part
-    )
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env["VIRTUAL_ENV"] = str(venv)
+    env["PATH"] = os.pathsep.join((str(bin_dir), env.get("PATH", os.defpath)))
     result = subprocess.run(
         [str(python), "-c", code, str(path)],
-        cwd=package_dir,
+        cwd=path.parent,
         env=env,
         capture_output=True,
         text=True,
@@ -297,11 +297,16 @@ def validate_prime_rl_config(path: Path) -> None:
 
 def format_trainer_command(resolved: FleetRunLayout) -> str:
     """Build the copy-pastable PrimeRL launch command for this fleet."""
+    package_dir = prime_rl_dir()
+    venv = package_dir / ".venv"
+    bin_dir = venv / "bin"
+    launcher = bin_dir / "rl"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise RuntimeError(f"PrimeRL launcher is missing or not executable: {launcher}")
     rendered_config = shlex.quote(str(config_path(resolved)))
     launch_command = supervise.format_shell_command(
         [
-            *supervise.UV_PYTHON_COMMAND,
-            LAUNCHER_SCRIPT,
+            str(launcher),
             "@",
             str(config_path(resolved)),
             "--clean-output-dir",
@@ -328,6 +333,10 @@ def format_trainer_command(resolved: FleetRunLayout) -> str:
             f"  cd {shlex.quote(str(project_root()))}",
             f"  {render_command}",
             f"  # generated config: {rendered_config}",
+            f"  cd {shlex.quote(str(package_dir))}",
+            "  unset PYTHONHOME PYTHONPATH",
+            f"  export VIRTUAL_ENV={shlex.quote(str(venv))}",
+            f'  export PATH={shlex.quote(str(bin_dir))}:"$PATH"',
             f"  {launch_command}",
         ]
     )

@@ -217,6 +217,7 @@ def test_prime_rl_validation_uses_the_pinned_checkouts_parser(
     python = package_dir / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
+    python.chmod(0o755)
     config = tmp_path / "generated.toml"
     config.write_text("output_dir = '/tmp/output'\n", encoding="utf-8")
     invocation = {}
@@ -226,6 +227,8 @@ def test_prime_rl_validation_uses_the_pinned_checkouts_parser(
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
     monkeypatch.setattr(prime_rl, "prime_rl_dir", lambda: package_dir)
+    monkeypatch.setenv("PYTHONHOME", "/wrong/python-home")
+    monkeypatch.setenv("PYTHONPATH", "/wrong/import-path")
     monkeypatch.setattr(prime_rl.subprocess, "run", run)
 
     prime_rl.validate_prime_rl_config(config)
@@ -234,10 +237,22 @@ def test_prime_rl_validation_uses_the_pinned_checkouts_parser(
     assert "from prime_rl.configs.rl import RLConfig" in invocation["command"][2]
     assert "RLConfig.model_validate" in invocation["command"][2]
     assert invocation["command"][3] == str(config)
-    assert invocation["cwd"] == package_dir
+    assert invocation["cwd"] == config.parent
+    assert "PYTHONHOME" not in invocation["env"]
+    assert "PYTHONPATH" not in invocation["env"]
+    assert invocation["env"]["VIRTUAL_ENV"] == str(package_dir / ".venv")
+    assert invocation["env"]["PATH"].split(":", 1)[0] == str(
+        package_dir / ".venv" / "bin"
+    )
 
 
-def test_submit_report_prints_prime_rl_next_steps(tmp_path):
+def test_submit_report_prints_prime_rl_next_steps(tmp_path, monkeypatch):
+    package_dir = tmp_path / "trainer-runtime"
+    launcher = package_dir / ".venv" / "bin" / "rl"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PRIME_RL_DIR", str(package_dir))
     layout = FleetRunLayout.for_run(
         run_id="fleet-a",
         run_base=tmp_path / "runs",
@@ -256,19 +271,26 @@ def test_submit_report_prints_prime_rl_next_steps(tmp_path):
     assert "Readiness:" in report
     assert "uv run --no-sync python -m desktop_fleet.supervise status" in report
     assert "uv run --no-sync python -m desktop_fleet.readiness" in report
-    assert "uv run --no-sync python scripts/prime_rl.py" in report
+    assert str(launcher) in report
     assert f"{prime_rl.config_path(layout)} --clean-output-dir" in report
-    assert ".venv/bin/rl" not in report
+    assert "scripts/prime_rl.py" not in report
     assert "rl/verifiers/prime-rl" not in report
+    assert "unset PYTHONHOME PYTHONPATH" in report
+    assert f"export VIRTUAL_ENV={package_dir / '.venv'}" in report
+    assert f'export PATH={package_dir / ".venv" / "bin"}:"$PATH"' in report
     assert "Cancel:" in report
 
 
-def test_prime_rl_dir_prefers_explicit_environment(tmp_path):
-    assert prime_rl.prime_rl_dir({"PRIME_RL_DIR": str(tmp_path / "pr")}) == (
-        tmp_path / "pr"
-    )
+def test_prime_rl_dir_requires_explicit_environment(tmp_path):
+    package_dir = tmp_path / "pr"
+    package_dir.mkdir()
+    assert prime_rl.prime_rl_dir({"PRIME_RL_DIR": str(package_dir)}) == package_dir
+    with pytest.raises(ValueError, match="PRIME_RL_DIR is required"):
+        prime_rl.prime_rl_dir({})
     with pytest.raises(ValueError, match="PRIME_RL_DIR must be an absolute path"):
         prime_rl.prime_rl_dir({"PRIME_RL_DIR": "relative/prime-rl"})
+    with pytest.raises(ValueError, match="PRIME_RL_DIR is not a directory"):
+        prime_rl.prime_rl_dir({"PRIME_RL_DIR": str(tmp_path / "missing")})
 
 
 def test_absolutize_slurm_template_path_leaves_absolute_paths_alone(tmp_path):
