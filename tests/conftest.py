@@ -15,9 +15,9 @@ from desktop_fleet.environment import (
 def environment_contract(tmp_path) -> EnvironmentContract:
     return EnvironmentContract(
         session=EnvironmentSession(
-            taskset={"id": "fixture-taskset", "dataset": "/datasets/tasks"},
+            taskset={"id": "server-taskset", "dataset": "/datasets/server-tasks"},
             harness={
-                "id": "fixture-harness",
+                "id": "server-harness",
                 "runner": {
                     "pool": {
                         "min_ready_sessions": 1,
@@ -33,9 +33,12 @@ def environment_contract(tmp_path) -> EnvironmentContract:
             status_dir_path=("runner", "pool", "status_dir"),
         ),
         source=EnvironmentSource(
-            name="fixture",
-            harness_overrides={"runner": {"pool": {"min_ready_sessions": 0}}},
-            harness_omit_paths=(("runner", "pool", "node_local_path"),),
+            name="consumer-source",
+            taskset={
+                "id": "consumer-taskset",
+                "dataset": "/datasets/consumer-tasks",
+            },
+            harness={"id": "consumer-harness"},
         ),
     )
 

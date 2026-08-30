@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-ENVIRONMENT_CONTRACT_VERSION = 1
+ENVIRONMENT_CONTRACT_VERSION = 2
 ENVIRONMENT_CONTRACT_ENV = "ENV_FLEET_ENVIRONMENT_CONTRACT"
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _LEGACY_METADATA_KEYS = frozenset(
@@ -115,8 +115,8 @@ class EnvironmentSession:
 @dataclass(frozen=True)
 class EnvironmentSource:
     name: str
-    harness_overrides: Mapping[str, Any]
-    harness_omit_paths: tuple[tuple[str, ...], ...]
+    taskset: Mapping[str, Any]
+    harness: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         name = self.name if isinstance(self.name, str) else ""
@@ -125,57 +125,30 @@ class EnvironmentSource:
                 "source.name must be a 1-64 character identifier containing only "
                 "letters, digits, underscores, and hyphens"
             )
-        overrides = _config_mapping(
-            self.harness_overrides, name="source.harness_overrides"
-        )
-        omit_paths = tuple(
-            _config_path(path, name="source.harness_omit_paths")
-            for path in self.harness_omit_paths
-        )
-        if len(set(omit_paths)) != len(omit_paths):
-            raise ValueError("source.harness_omit_paths must not contain duplicates")
+        taskset = _config_mapping(self.taskset, name="source.taskset")
+        harness = _config_mapping(self.harness, name="source.harness")
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "harness_overrides", overrides)
-        object.__setattr__(self, "harness_omit_paths", omit_paths)
-
-    def render_harness(self, session: EnvironmentSession) -> dict[str, Any]:
-        harness = deepcopy(dict(session.harness))
-        _merge_config(harness, self.harness_overrides, path=())
-        for path in self.harness_omit_paths:
-            parent = _path_parent(harness, path)
-            if path[-1] not in parent:
-                raise ValueError(
-                    f"source harness omit path does not exist: {'.'.join(path)}"
-                )
-            del parent[path[-1]]
-        return harness
+        object.__setattr__(self, "taskset", taskset)
+        object.__setattr__(self, "harness", harness)
 
     def as_metadata(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "harness_overrides": deepcopy(dict(self.harness_overrides)),
-            "harness_omit_paths": [list(path) for path in self.harness_omit_paths],
+            "taskset": deepcopy(dict(self.taskset)),
+            "harness": deepcopy(dict(self.harness)),
         }
 
     @classmethod
     def from_metadata(cls, payload: Mapping[str, Any]) -> Self:
         _require_exact_keys(
             payload,
-            {"name", "harness_overrides", "harness_omit_paths"},
+            {"name", "taskset", "harness"},
             name="environment source",
         )
-        omit_paths = payload["harness_omit_paths"]
-        if not isinstance(omit_paths, list):
-            raise ValueError("environment source harness_omit_paths must be a list")
         return cls(
             name=_string(payload, "name", name="environment source"),
-            harness_overrides=_mapping(
-                payload, "harness_overrides", name="environment source"
-            ),
-            harness_omit_paths=tuple(
-                _serialized_config_path(path, name="environment source harness omit path")
-                for path in omit_paths
-            ),
+            taskset=_mapping(payload, "taskset", name="environment source"),
+            harness=_mapping(payload, "harness", name="environment source"),
         )
 
 
@@ -183,9 +156,6 @@ class EnvironmentSource:
 class EnvironmentContract:
     session: EnvironmentSession
     source: EnvironmentSource
-
-    def __post_init__(self) -> None:
-        self.source.render_harness(self.session)
 
     def as_metadata(self) -> dict[str, Any]:
         return {
@@ -277,34 +247,6 @@ def _path_parent(
     if not isinstance(current, dict):
         raise ValueError(f"config path parent is immutable: {'.'.join(path)}")
     return current
-
-
-def _merge_config(
-    target: dict[str, Any],
-    values: Mapping[str, Any],
-    *,
-    path: tuple[str, ...],
-) -> None:
-    for key, value in values.items():
-        current_path = (*path, key)
-        if key not in target:
-            raise ValueError(
-                f"source harness override path does not exist: {'.'.join(current_path)}"
-            )
-        current = target[key]
-        current_is_table = isinstance(current, dict)
-        value_is_table = isinstance(value, Mapping)
-        if current_is_table != value_is_table:
-            raise ValueError(
-                "source harness override cannot replace a table with a scalar or "
-                f"a scalar with a table: {'.'.join(current_path)}"
-            )
-        if current_is_table:
-            assert isinstance(current, dict)
-            assert isinstance(value, Mapping)
-            _merge_config(current, value, path=current_path)
-        else:
-            target[key] = deepcopy(value)
 
 
 def _config_mapping(value: object, *, name: str) -> dict[str, Any]:

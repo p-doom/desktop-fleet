@@ -65,22 +65,16 @@ def test_readiness_is_read_from_the_exact_status_path_parent(environment_contrac
     assert "min_ready_sessions" not in environment_contract.session.as_metadata()
 
 
-def test_source_transformation_is_declarative_and_preserves_other_values(
+def test_source_configs_are_independent_of_the_server_session(
     environment_contract,
 ):
-    rendered = environment_contract.source.render_harness(
-        environment_contract.session
-    )
-
-    assert rendered == {
-        "id": "fixture-harness",
-        "runner": {
-            "pool": {
-                "min_ready_sessions": 0,
-                "max_sessions": 3,
-            }
-        },
+    assert environment_contract.source.taskset == {
+        "id": "consumer-taskset",
+        "dataset": "/datasets/consumer-tasks",
     }
+    assert environment_contract.source.harness == {"id": "consumer-harness"}
+    assert environment_contract.session.taskset["id"] == "server-taskset"
+    assert environment_contract.session.harness["id"] == "server-harness"
     assert environment_contract.session.harness["runner"]["pool"] == {
         "min_ready_sessions": 1,
         "max_sessions": 3,
@@ -88,50 +82,47 @@ def test_source_transformation_is_declarative_and_preserves_other_values(
     }
 
 
-def test_invalid_source_omit_path_is_rejected_when_the_contract_is_built(tmp_path):
-    session = EnvironmentSession(
-        taskset={"id": "tasks"},
-        harness={"runner": {"pool": {"min_ready_sessions": 1}}},
-        output_dir=tmp_path / "output",
-        rollout_timeout=60.0,
-        max_retries=1,
-        max_turns=2,
-        status_dir_path=("runner", "pool", "status_dir"),
+def test_source_config_inputs_are_copied():
+    taskset = {
+        "id": "consumer-taskset",
+        "options": {"split": "original"},
+    }
+    harness = {
+        "id": "consumer-harness",
+        "options": {"mode": "original"},
+    }
+    source = EnvironmentSource(
+        name="consumer-source",
+        taskset=taskset,
+        harness=harness,
     )
 
-    with pytest.raises(ValueError, match="omit path does not exist"):
-        EnvironmentContract(
-            session=session,
-            source=EnvironmentSource(
-                name="fixture",
-                harness_overrides={},
-                harness_omit_paths=(("runner", "pool", "missing"),),
-            ),
-        )
+    taskset["options"]["split"] = "mutated"
+    harness["options"]["mode"] = "mutated"
+
+    assert source.taskset["options"] == {"split": "original"}
+    assert source.harness["options"] == {"mode": "original"}
 
 
-def test_source_override_paths_must_exist(environment_contract):
+def test_contract_rejects_the_removed_source_transformation_shape(
+    environment_contract,
+):
     payload = environment_contract.as_metadata()
-    payload["source"]["harness_overrides"] = {
-        "runner": {"pool": {"min_ready_session": 0}}
+    payload["source"] = {
+        "name": "consumer-source",
+        "harness_overrides": {},
+        "harness_omit_paths": [],
     }
 
-    with pytest.raises(ValueError, match="override path does not exist"):
+    with pytest.raises(ValueError, match="environment source keys do not match"):
         EnvironmentContract.from_metadata(payload)
 
 
-@pytest.mark.parametrize(
-    "override",
-    [
-        {"runner": "not-a-table"},
-        {"id": {"nested": "not-a-scalar"}},
-    ],
-)
-def test_source_overrides_cannot_change_table_shape(environment_contract, override):
+def test_version_one_metadata_fails_clearly(environment_contract):
     payload = environment_contract.as_metadata()
-    payload["source"]["harness_overrides"] = override
+    payload["version"] = 1
 
-    with pytest.raises(ValueError, match="cannot replace a table with a scalar"):
+    with pytest.raises(ValueError, match="unsupported environment contract version: 1"):
         EnvironmentContract.from_metadata(payload)
 
 

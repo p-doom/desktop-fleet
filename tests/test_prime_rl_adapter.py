@@ -98,32 +98,20 @@ def test_render_prime_rl_fleet_config_uses_current_source_schema(
     assert "max_inflight_rollouts" not in config["orchestrator"]
     assert "env" not in config["orchestrator"]["train"]
     assert source == {
-        "name": "fixture",
+        "name": "consumer-source",
         "env": {
             "taskset": {
-                "id": "fixture-taskset",
-                "dataset": "/datasets/tasks",
+                "id": "consumer-taskset",
+                "dataset": "/datasets/consumer-tasks",
             },
             "agent": {
-                "harness": {
-                    "id": "fixture-harness",
-                    "runner": {
-                        "pool": {
-                            "min_ready_sessions": 0,
-                            "max_sessions": 3,
-                        }
-                    },
-                },
+                "harness": {"id": "consumer-harness"},
                 "timeout": {"rollout": 600.0},
                 "retries": {"max_retries": 2},
                 "max_turns": 4,
             },
         },
         "serve": {"address": "tcp://node001:5200"},
-    }
-    assert source["env"]["agent"]["harness"]["runner"]["pool"] == {
-        "min_ready_sessions": 0,
-        "max_sessions": 3,
     }
     assert config["inference"] == {"gpu_memory_utilization": 0.85}
 

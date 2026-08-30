@@ -7,8 +7,9 @@ package.
 
 ## Environment contract
 
-Every fleet is prepared from one absolute JSON contract path. Version 1 carries
-a session configuration and one named source transformation. The loader
+Every fleet is prepared from one absolute JSON contract path. Version 2 carries
+a full environment-server session configuration and one named consumer source
+with its own explicit taskset and harness configurations. The loader
 requires exact keys, validates the status-directory injection path, and rejects
 legacy flat metadata.
 

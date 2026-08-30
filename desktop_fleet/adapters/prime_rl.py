@@ -229,12 +229,13 @@ def absolutize_slurm_template_path(config: dict[str, Any]) -> None:
 def external_source_config(metadata: Mapping[str, Any]) -> dict[str, Any]:
     contract = environment_contract_from_registry_metadata(metadata)
     session = contract.session
+    source = contract.source
     return {
-        "name": contract.source.name,
+        "name": source.name,
         "env": {
-            "taskset": dict(session.taskset),
+            "taskset": dict(source.taskset),
             "agent": {
-                "harness": contract.source.render_harness(session),
+                "harness": dict(source.harness),
                 "timeout": {"rollout": session.rollout_timeout},
                 "retries": {"max_retries": session.max_retries},
                 "max_turns": session.max_turns,
