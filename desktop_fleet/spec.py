@@ -478,24 +478,13 @@ def write_env_server_config(
         spec.pool_status_dir,
     )
     payload = {
-        "output_dir": str(session.output_dir),
-        "log": {"level": "INFO"},
-        "env": {
-            "name": spec.name,
-            "env": {
-                "taskset": dict(session.taskset),
-                "agent": {
-                    "harness": harness,
-                    "timeout": {"rollout": session.rollout_timeout},
-                    "retries": {"max_retries": session.max_retries},
-                    "max_turns": session.max_turns,
-                },
-            },
-            "serve": {
-                "address": spec.bind_address,
-                "pool": {"type": "static", "num_workers": spec.num_workers},
-            },
-        },
+        "taskset": dict(session.taskset),
+        "harness": harness,
+        "timeout": {"rollout": session.rollout_timeout},
+        "retries": {"rollout": {"max_retries": session.max_retries}},
+        "max_turns": session.max_turns,
+        "address": spec.bind_address,
+        "pool": {"type": "static", "num_workers": spec.num_workers},
     }
     Path(spec.config_path).write_text(to_toml(payload), encoding="utf-8")
 

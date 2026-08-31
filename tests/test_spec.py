@@ -238,22 +238,16 @@ def test_env_server_config_injects_the_exact_serialized_status_path(
 
     with Path(server.config_path).open("rb") as file:
         config = tomllib.load(file)
-    env = config["env"]
-    assert env["name"] == "fixture-0002"
-    assert env["serve"] == {
-        "address": "tcp://0.0.0.0:5200",
-        "pool": {"type": "static", "num_workers": 2},
-    }
-    agent = env["env"]["agent"]
-    assert env["env"]["taskset"] == environment_contract.session.taskset
-    assert agent["timeout"] == {"rollout": 600.0}
-    assert agent["retries"] == {"max_retries": 2}
-    assert agent["max_turns"] == 4
-    pool = agent["harness"]["runner"]["pool"]
+    assert config["address"] == "tcp://0.0.0.0:5200"
+    assert config["pool"] == {"type": "static", "num_workers": 2}
+    assert config["taskset"] == environment_contract.session.taskset
+    assert config["timeout"] == {"rollout": 600.0}
+    assert config["retries"] == {"rollout": {"max_retries": 2}}
+    assert config["max_turns"] == 4
+    pool = config["harness"]["runner"]["pool"]
     assert pool["status_dir"] == server.pool_status_dir
     assert pool["min_ready_sessions"] == environment_contract.session.min_ready_sessions
     assert pool["node_local_path"] == "/runtime/node-local.json"
-    assert config["output_dir"] == str(environment_contract.session.output_dir)
 
 
 def test_accepted_contract_config_round_trips_through_toml(
@@ -284,7 +278,7 @@ def test_accepted_contract_config_round_trips_through_toml(
 
     with Path(server.config_path).open("rb") as file:
         rendered = tomllib.load(file)
-    assert rendered["env"]["env"]["taskset"] == contract.session.taskset
+    assert rendered["taskset"] == contract.session.taskset
 
 
 def test_scratch_helpers_default_to_project_scratch(monkeypatch):
