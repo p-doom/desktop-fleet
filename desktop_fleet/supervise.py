@@ -497,9 +497,9 @@ def launch_main(argv: Sequence[str] | None = None) -> int:
     prepare_main([])
 
     layout = FleetRunLayout.from_env(env)
-    env_server_bin = Path(sys.executable).with_name("env-server")
+    env_server_bin = Path(sys.executable).with_name("serve")
     if not env_server_bin.is_file():
-        raise RuntimeError(f"env-server is missing beside the fleet Python: {env_server_bin}")
+        raise RuntimeError(f"serve is missing beside the fleet Python: {env_server_bin}")
     supervisor_args = [
         "--config-dir",
         str(layout.node_configs_dir(node_rank)),

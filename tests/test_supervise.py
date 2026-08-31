@@ -770,7 +770,7 @@ def test_launch_prepares_then_supervises_one_node_with_global_topology(
     tmp_path,
 ):
     python = tmp_path / "venv" / "bin" / "python"
-    env_server = python.with_name("env-server")
+    env_server = python.with_name("serve")
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
     env_server.write_text("", encoding="utf-8")
