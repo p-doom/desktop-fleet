@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
@@ -81,7 +81,7 @@ wheels = [
 [[package]]
 name = "desktop"
 version = "0.1.0"
-source = { git = "https://github.com/p-doom/desktop.git?rev=47c08a7379c0fe3d7589298207cd2ff49182d645#47c08a7379c0fe3d7589298207cd2ff49182d645" }
+source = { git = "https://github.com/p-doom/desktop.git?rev=f24b015a1130098f8a6d70482e77e0328e275832#f24b015a1130098f8a6d70482e77e0328e275832" }
 dependencies = [
     { name = "pillow" },
 ]
@@ -108,7 +108,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "desktop", git = "https://github.com/p-doom/desktop.git?rev=47c08a7379c0fe3d7589298207cd2ff49182d645" },
+    { name = "desktop", git = "https://github.com/p-doom/desktop.git?rev=f24b015a1130098f8a6d70482e77e0328e275832" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyzmq", specifier = ">=26.0" },

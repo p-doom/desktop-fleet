@@ -17,7 +17,7 @@ dependencies = [
 
 [tool.uv.sources]
 # PyPI's `desktop` 0.4.2 is an unrelated package with the same name.
-desktop = { git = "https://github.com/p-doom/desktop.git", rev = "47c08a7379c0fe3d7589298207cd2ff49182d645" }
+desktop = { git = "https://github.com/p-doom/desktop.git", rev = "f24b015a1130098f8a6d70482e77e0328e275832" }
 
 [project.scripts]
 desktop-fleet = "desktop_fleet.supervise:main"
