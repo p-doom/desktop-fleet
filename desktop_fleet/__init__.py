@@ -11,6 +11,13 @@ No consumer-specific coupling belongs anywhere but ``desktop_fleet.adapters``.
 
 from __future__ import annotations
 
+from desktop_fleet.environment import (
+    EnvironmentContract,
+    EnvironmentSession,
+    EnvironmentSource,
+    read_environment_contract,
+)
+from desktop_fleet.node import NodeService, run_node
 from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
@@ -50,14 +57,17 @@ from desktop_fleet.spec import (
     require_absolute_path,
     scratch_root,
     to_toml,
-    toml_literal,
     write_env_server_config,
 )
 
 __all__ = [
     "EnvFleetRegistry",
     "EnvServerSpec",
+    "EnvironmentContract",
+    "EnvironmentSession",
+    "EnvironmentSource",
     "FleetRunLayout",
+    "NodeService",
     "ReadinessSummary",
     "SlurmJob",
     "active_worker_statuses",
@@ -71,6 +81,7 @@ __all__ = [
     "query_squeue",
     "read_registry",
     "read_registry_if_ready",
+    "read_environment_contract",
     "read_statuses",
     "readiness_summary",
     "render_consumer_paths",
@@ -78,6 +89,7 @@ __all__ = [
     "resolve_min_ready",
     "resolve_status_dir",
     "run_command",
+    "run_node",
     "scratch_root",
     "select_cancel_job",
     "slurm_job_id_from_registry",
@@ -86,7 +98,6 @@ __all__ = [
     "stale_worker_statuses",
     "sum_int_field",
     "to_toml",
-    "toml_literal",
     "upsert_registry",
     "write_env_server_config",
 ]

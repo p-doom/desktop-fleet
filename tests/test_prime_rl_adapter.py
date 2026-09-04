@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +12,7 @@ from desktop_fleet.supervise import format_submit_report
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
 def test_prime_rl_paths_default_under_the_run_dir(tmp_path):
@@ -31,10 +30,10 @@ def test_prime_rl_paths_default_under_the_run_dir(tmp_path):
 def test_prime_rl_paths_honor_environment_overrides(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "run-a",
-        "OSWORLD_RUN_BASE": str(tmp_path / "base"),
-        "OSWORLD_PRIME_RL_CONFIG_PATH": str(tmp_path / "prime_rl.toml"),
-        "OSWORLD_PRIME_RL_OUTPUT_DIR": str(tmp_path / "prime_rl"),
+        "ENV_FLEET_RUN_ID": "run-a",
+        "ENV_FLEET_RUN_BASE": str(tmp_path / "base"),
+        "ENV_FLEET_PRIME_RL_CONFIG_PATH": str(tmp_path / "prime_rl.toml"),
+        "ENV_FLEET_PRIME_RL_OUTPUT_DIR": str(tmp_path / "prime_rl"),
     }
 
     layout = prime_rl.with_prime_rl_paths(FleetRunLayout.from_env(env), env)
@@ -49,8 +48,8 @@ def test_prime_rl_paths_honor_environment_overrides(tmp_path):
 
 def test_prime_rl_paths_survive_a_registry_metadata_round_trip(tmp_path):
     env = {
-        "OSWORLD_PRIME_RL_CONFIG_PATH": str(tmp_path / "custom" / "prime_rl.toml"),
-        "OSWORLD_PRIME_RL_OUTPUT_DIR": str(tmp_path / "custom" / "prime_rl_output"),
+        "ENV_FLEET_PRIME_RL_CONFIG_PATH": str(tmp_path / "custom" / "prime_rl.toml"),
+        "ENV_FLEET_PRIME_RL_OUTPUT_DIR": str(tmp_path / "custom" / "prime_rl_output"),
     }
     layout = prime_rl.with_prime_rl_paths(
         FleetRunLayout.for_run(run_id="13969570", run_base=tmp_path / "shared"),
@@ -68,32 +67,20 @@ def test_prime_rl_paths_survive_a_registry_metadata_round_trip(tmp_path):
     )
 
 
-def test_render_prime_rl_fleet_config_uses_v1_schema(tmp_path):
+def test_render_prime_rl_fleet_config_uses_current_source_schema(
+    tmp_path,
+    environment_metadata,
+):
     metadata = {
-        "env_id": "rl",
-        "env_name_prefix": "osworld",
-        "task_base_path": "/tasks",
-        "max_tasks": 4,
-        "shuffle_seed": 7,
+        **environment_metadata,
         "gateway": {"public_address": "tcp://node001:5200"},
-        "harness": {
-            "max_steps": 4,
-            "desktop": {
-                "output_dir": str(tmp_path / "worker-output"),
-                "cache_dir": "/scratch/user/cache",
-                "desktop_pool_config": {
-                    "min_ready_sessions": 1,
-                    "max_sessions": 3,
-                },
-            },
-        },
     }
     config = {
         "output_dir": "/old",
         "orchestrator": {
-            "max_inflight_rollouts": 1,
+            "max_inflight_episodes": 1,
             "group_size": 4,
-            "train": {"env": [{"name": "old"}]},
+            "train": {"source": [{"name": "old"}]},
         },
         "inference": {"gpu_memory_utilization": 0.85},
     }
@@ -102,102 +89,106 @@ def test_render_prime_rl_fleet_config_uses_v1_schema(tmp_path):
         config,
         metadata=metadata,
         output_dir=tmp_path / "trainer-output",
-        max_inflight_rollouts=2,
-        rollout_timeout=3600,
-        max_retries=1,
+        max_inflight_episodes=2,
     )
 
-    env = config["orchestrator"]["train"]["env"][0]
+    source = config["orchestrator"]["train"]["source"][0]
     assert config["output_dir"] == str(tmp_path / "trainer-output")
-    assert config["orchestrator"]["max_inflight_rollouts"] == 4
-    assert env["address"] == "tcp://node001:5200"
-    assert env["taskset"] == {
-        "id": "rl",
-        "base_path": "/tasks",
-        "max_tasks": 4,
-        "shuffle_seed": 7,
+    assert config["orchestrator"]["max_inflight_episodes"] == 4
+    assert "max_inflight_rollouts" not in config["orchestrator"]
+    assert "env" not in config["orchestrator"]["train"]
+    assert source == {
+        "name": "fixture",
+        "env": {
+            "taskset": {
+                "id": "fixture-taskset",
+                "dataset": "/datasets/tasks",
+            },
+            "agent": {
+                "harness": {
+                    "id": "fixture-harness",
+                    "runner": {
+                        "pool": {
+                            "min_ready_sessions": 0,
+                            "max_sessions": 3,
+                        }
+                    },
+                },
+                "timeout": {"rollout": 600.0},
+                "retries": {"max_retries": 2},
+                "max_turns": 4,
+            },
+        },
+        "serve": {"address": "tcp://node001:5200"},
     }
-    assert env["harness"]["id"] == "rl"
-    assert env["harness"]["desktop"]["desktop_pool_config"] == {
+    assert source["env"]["agent"]["harness"]["runner"]["pool"] == {
         "min_ready_sessions": 0,
         "max_sessions": 3,
     }
-    assert env["timeout"] == {"rollout": 3600}
-    assert env["retries"] == {"rollout": {"max_retries": 1}}
-    assert env["max_turns"] == 4
     assert config["inference"] == {"gpu_memory_utilization": 0.85}
 
 
-@pytest.mark.parametrize("key", ["env_name_prefix", "max_tasks", "shuffle_seed"])
-def test_render_prime_rl_fleet_config_requires_every_taskset_key(key):
-    """A substituted shuffle_seed of 0 shuffles differently, and silently."""
-    metadata = {
-        "env_id": "rl",
-        "env_name_prefix": "osworld",
-        "task_base_path": "/tasks",
-        "max_tasks": 4,
-        "shuffle_seed": 7,
-        "harness": {"max_steps": 4},
-        "gateway": {"public_address": "tcp://node001:5200"},
-    }
-    del metadata[key]
-
-    with pytest.raises(ValueError, match=key):
-        prime_rl.external_env_config(metadata, rollout_timeout=3600, max_retries=1)
-
-
-def test_render_prime_rl_fleet_config_requires_group_size():
-    """Our 1 was not PrimeRL's group size, and the inflight cap derives from it."""
+def test_render_prime_rl_fleet_config_requires_group_size(environment_metadata):
     config = {
         "output_dir": "/old",
-        "orchestrator": {"max_inflight_rollouts": 1, "train": {"env": []}},
+        "orchestrator": {"train": {"source": []}},
     }
 
     with pytest.raises(ValueError, match="group_size"):
         prime_rl.configure_external_fleet(
             config,
             metadata={
-                "env_id": "rl",
-                "env_name_prefix": "osworld",
-                "task_base_path": "/tasks",
-                "max_tasks": 4,
-                "shuffle_seed": 7,
-                "harness": {"max_steps": 4},
+                **environment_metadata,
                 "gateway": {"public_address": "tcp://node001:5200"},
             },
             output_dir=Path("/out"),
-            max_inflight_rollouts=2,
-            rollout_timeout=3600,
-            max_retries=1,
+            max_inflight_episodes=2,
         )
 
 
-def test_render_prime_rl_fleet_config_requires_gateway_address(tmp_path):
-    metadata = {
-        "env_id": "rl",
-        "env_name_prefix": "osworld",
-        "task_base_path": "/tasks",
-        "max_tasks": 4,
-        "shuffle_seed": 7,
-        "harness": {"max_steps": 4},
+@pytest.mark.parametrize(
+    ("stale_key", "message"),
+    [
+        ("train.env", "orchestrator.train.env is stale"),
+        ("max_inflight_rollouts", "orchestrator.max_inflight_rollouts is stale"),
+    ],
+)
+def test_render_prime_rl_fleet_config_rejects_stale_base_schema(
+    environment_metadata,
+    stale_key,
+    message,
+):
+    config = {
+        "orchestrator": {
+            "group_size": 4,
+            "train": {"source": []},
+        }
     }
+    if stale_key == "train.env":
+        config["orchestrator"]["train"]["env"] = []
+    else:
+        config["orchestrator"][stale_key] = 1
 
-    with pytest.raises(ValueError, match="gateway.public_address"):
-        prime_rl.external_env_config(
-            metadata,
-            rollout_timeout=3600,
-            max_retries=1,
+    with pytest.raises(ValueError, match=message):
+        prime_rl.configure_external_fleet(
+            config,
+            metadata={
+                **environment_metadata,
+                "gateway": {"public_address": "tcp://node001:5200"},
+            },
+            output_dir=Path("/out"),
+            max_inflight_episodes=2,
         )
 
 
-def test_render_prime_rl_fleet_config_uses_gateway_address(tmp_path):
+def test_render_prime_rl_fleet_config_requires_gateway_address(environment_metadata):
+    with pytest.raises(ValueError, match="gateway.public_address"):
+        prime_rl.external_source_config(environment_metadata)
+
+
+def test_render_prime_rl_fleet_config_uses_gateway_address(environment_metadata):
     metadata = {
-        "env_id": "rl",
-        "env_name_prefix": "osworld",
-        "task_base_path": "/tasks",
-        "max_tasks": 4,
-        "shuffle_seed": 7,
-        "harness": {"max_steps": 4},
+        **environment_metadata,
         "gateway": {
             "bind_address": "tcp://0.0.0.0:5202",
             "public_address": "tcp://node001:5202",
@@ -205,14 +196,57 @@ def test_render_prime_rl_fleet_config_uses_gateway_address(tmp_path):
         },
     }
 
-    rendered = prime_rl.external_env_config(
-        metadata,
-        rollout_timeout=3600,
-        max_retries=1,
-    )
+    rendered = prime_rl.external_source_config(metadata)
 
-    assert rendered["address"] == "tcp://node001:5202"
-    assert "tcp://node001:5200" not in json.dumps(rendered)
+    assert rendered["serve"]["address"] == "tcp://node001:5202"
+
+
+def test_render_refuses_a_partial_registry_before_counting_workers(
+    tmp_path,
+    monkeypatch,
+):
+    registry_path = tmp_path / "registry.json"
+    registry = SimpleNamespace(
+        servers=[object()],
+        metadata={"expected_env_servers": 2, "expected_env_workers": 2},
+    )
+    monkeypatch.setattr(
+        prime_rl,
+        "parse_render_args",
+        lambda _argv: SimpleNamespace(registry=registry_path),
+    )
+    monkeypatch.setattr(prime_rl, "read_registry", lambda _path: registry)
+
+    with pytest.raises(ValueError, match="expected 2 env servers, found 1"):
+        prime_rl.render_main([])
+
+
+def test_prime_rl_validation_uses_the_pinned_checkouts_parser(
+    tmp_path,
+    monkeypatch,
+):
+    package_dir = tmp_path / "prime-rl"
+    python = package_dir / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    config = tmp_path / "generated.toml"
+    config.write_text("output_dir = '/tmp/output'\n", encoding="utf-8")
+    invocation = {}
+
+    def run(command, **kwargs):
+        invocation.update(command=command, **kwargs)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(prime_rl, "prime_rl_dir", lambda: package_dir)
+    monkeypatch.setattr(prime_rl.subprocess, "run", run)
+
+    prime_rl.validate_prime_rl_config(config)
+
+    assert invocation["command"][0] == str(python)
+    assert "from prime_rl.configs.rl import RLConfig" in invocation["command"][2]
+    assert "RLConfig.model_validate" in invocation["command"][2]
+    assert invocation["command"][3] == str(config)
+    assert invocation["cwd"] == package_dir
 
 
 def test_submit_report_prints_prime_rl_next_steps(tmp_path):

@@ -27,6 +27,7 @@ from desktop.vm.pool import (
     DesktopPoolConfig,
     DesktopSessionPool,
     PortLease,
+    PortRangeLease,
     ports_for_worker,
 )
 
@@ -72,12 +73,19 @@ def _port_allocator():
         logdir = Path(log_dir) / f"w{slot}"
         workdir.mkdir(parents=True, exist_ok=True)
         logdir.mkdir(parents=True, exist_ok=True)
+        ports = ports_for_worker(51000, slot)
         return PortLease(
-            ports=ports_for_worker(51000, slot),
+            ports=ports,
             slot=slot,
             workdir=workdir,
             logdir=logdir,
-            _lock_file=(lock_dir / f"w{slot}.lock").open("w"),
+            _range_lease=PortRangeLease(
+                start=ports.server,
+                count=10,
+                lock_dir=lock_dir,
+                purpose="fake",
+                _lock_files=(),
+            ),
         )
 
     return allocate

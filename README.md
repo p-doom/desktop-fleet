@@ -1,85 +1,57 @@
 # desktop-fleet
 
-Slurm-native, capacity-aware fleet management for [`verifiers`](https://github.com/willccbb/verifiers)
-env-servers whose scarce resource is an externally-leased machine.
+`desktop-fleet` runs capacity-aware fleets of `verifiers` environment servers
+across Slurm nodes. It manages service discovery, readiness, routing, and
+process lifetime; desktop actions and VM behavior remain in the `desktop`
+package.
 
-desktop-fleet manages machines. It never sees an action, a grammar, or a reward.
+## Environment contract
 
-## What a worker is here
+Every fleet is prepared from one absolute JSON contract path. Version 1 carries
+a session configuration and one named source transformation. The loader
+requires exact keys, validates the status-directory injection path, and rejects
+legacy flat metadata.
 
-A worker owns a QEMU desktop VM inside an apptainer container inside a
-multi-node Slurm allocation. Startup takes minutes, the VM can die without the
-server dying, and the machine is leased from a scheduler that can preempt it.
-`verifiers`' own broker binds one `ipc://` socket per worker behind a single
-`tcp://127.0.0.1:5000` frontend, so it is single-node by construction. On top of
-it desktop-fleet adds:
+Preparation writes the validated contract and run layout into the locked fleet
+registry. Each environment-server config receives its own pool status path.
 
-1. A registry (`desktop_fleet.registry`) — a lock-protected JSON file every node
-   upserts into, so a consumer that starts later discovers the whole fleet from
-   disk alone.
-2. Capacity accounting (`desktop_fleet.readiness`) — worker pools heartbeat one
-   status file each; the fleet counts `ready`/`starting`/`leased`, discards stale
-   writers, and exposes a blocking readiness gate.
-3. A cross-node broker (`desktop_fleet.broker`) — `tcp://` end to end, one DEALER
-   per replica on other nodes, and routing keyed on VM-pool capacity read
-   from those status files (`available_ready_sessions`,
-   `backend_capacity_rank`). Requests queue instead of failing when every leased
-   machine is busy; `ipc://` cannot express this.
-4. Supervision (`desktop_fleet.supervise`) — restart a replica that lost its
-   desktops, reap the *whole process group* of the replica it spawned so a
-   desktop the replica left behind dies with it, and give up loudly with an
-   `fleet_unrecoverable.json` marker.
+## Slurm lifecycle
 
-   This package never names QEMU or apptainer. It reaps by process group
-   because `desktop` deliberately keeps a VM in its worker's group, and it
-   reaps a replica whose own process has already exited, which is the case that
-   leaks: nothing on disk records a per-VM process group, and a VM still
-   booting has not published anything at all.
+`submit` uses the packaged `desktop_fleet/run_env_fleet.sbatch`. The allocation
+runs one `launch` task per node. Each task prepares its node's configs and
+supervises its environment-server process groups; rank zero also starts the
+cross-node gateway. Node-count, replica-count, memory, and readiness mismatches
+fail before consumer launch.
 
-## Layout
+The registry and pool status files are the service interface used by `status`,
+the readiness gate, and the gateway. Stale status writers do not contribute
+capacity.
 
-| module | responsibility |
-| --- | --- |
-| `desktop_fleet/spec.py` | `EnvServerSpec`, `FleetRunLayout`, path/env helpers, verifiers env-server TOML rendering |
-| `desktop_fleet/registry.py` | the durable, `flock`-protected fleet registry |
-| `desktop_fleet/slurm.py` | Slurm identity, `NodeAddr` resolution, `squeue`/`scancel` guards |
-| `desktop_fleet/readiness.py` | status-file capacity accounting + the readiness gate CLI |
-| `desktop_fleet/supervise.py` | `prepare` / `run` / `submit` / `status` / `cancel` |
-| `desktop_fleet/broker.py` | cross-node, capacity-aware ZMQ rollout broker |
-| `desktop_fleet/adapters/` | the only place a specific consumer may be named |
-
-## The containment rule
-
-`grep -c prime_rl desktop_fleet/*.py` is `0`. Every consumer-specific name, import,
-config key, and path lives in `desktop_fleet/adapters/prime_rl.py`. The core reaches
-a consumer only through neutral seams:
-
-* `FleetRunLayout.consumer_paths` — an opaque `name -> absolute path` map, fed by
-  `--consumer-path NAME=PATH` or `ENV_FLEET_CONSUMER_PATHS`, round-tripped
-  through registry `layout` metadata. The adapter names the keys.
-* `supervise.main(..., trainer_section_factory=...)` — a passed-in callable that
-  renders the consumer's launch block into the submit report.
-
-Import direction is strictly `adapters -> core`.
-
-## Usage
+## Commands
 
 ```bash
-# submit the fleet service (with the prime-rl launch hints)
-uv run --no-sync python -m desktop_fleet.adapters.prime_rl submit --dry-run
+contract=/absolute/path/to/environment.json
 
-# or with no consumer at all
-uv run --no-sync python -m desktop_fleet.supervise submit --nodes 2 --servers-per-node 8
+uv run --no-sync python -m desktop_fleet.supervise submit \
+    --environment-contract "$contract" \
+    --nodes 2 \
+    --servers-per-node 8 \
+    --workers-per-server 4
 
-# inside the allocation, per node
-python -m desktop_fleet.supervise prepare
-python -m desktop_fleet.supervise run --config-dir ... --logs-dir ... \
-    --registry ... --env-server-bin ... --start-gateway
+uv run --no-sync python -m desktop_fleet.supervise status --run-id <run-id>
+uv run --no-sync python -m desktop_fleet.readiness \
+    --registry /absolute/run/env_registry.json
+uv run --no-sync python -m desktop_fleet.supervise cancel \
+    --run-id <run-id> --yes
+```
 
-# block until enough machines are warm
-python -m desktop_fleet.readiness --registry "$OSWORLD_ENV_FLEET_REGISTRY"
+Consumer-specific launch hints live under `desktop_fleet/adapters/`; the core
+fleet commands do not depend on an adapter.
 
-# inspect / tear down
-python -m desktop_fleet.supervise status --run-id <run-id>
-python -m desktop_fleet.supervise cancel --run-id <run-id>
+## Checks
+
+```bash
+pytest
+ruff check .
+mypy desktop_fleet
 ```

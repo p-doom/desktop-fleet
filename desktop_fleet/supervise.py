@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,6 +30,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+from desktop_fleet.environment import (
+    ENVIRONMENT_CONTRACT_ENV,
+    EnvironmentContract,
+    read_environment_contract,
+)
+from desktop_fleet.local_runtime import (
+    LOCAL_RUNTIME_OWNER_FILE,
+    LocalRuntimeScope,
+    local_runtime_scope,
+)
 from desktop_fleet.readiness import (
     ReadinessSummary,
     active_worker_statuses,
@@ -49,6 +60,7 @@ from desktop_fleet.slurm import (
     query_squeue,
     select_cancel_job,
     slurm_job_id_from_registry,
+    slurm_memory_gb,
     slurm_metadata,
     slurm_node_addrs,
 )
@@ -59,14 +71,11 @@ from desktop_fleet.spec import (
     load_runtime_env_file,
     make_server_specs,
     parse_consumer_paths,
-    project_root,
-    require_absolute_path,
-    scratch_subdir,
     write_env_server_config,
 )
 
-DEFAULT_FLEET_SCRIPT = Path("sbatch/run_osworld_env_fleet.sbatch")
-DEFAULT_JOB_NAME = "osworld_env_fleet"
+DEFAULT_FLEET_SCRIPT = Path(__file__).with_name("run_env_fleet.sbatch")
+DEFAULT_JOB_NAME = "env_fleet"
 UV_PYTHON_COMMAND = ("uv", "run", "--no-sync", "python")
 FLEET_MODULE = "desktop_fleet.supervise"
 READINESS_MODULE = "desktop_fleet.readiness"
@@ -90,7 +99,7 @@ class Opt:
     flag: str
     kind: Callable[[str], Any]
     default: Any = None
-    env: str | None = None  # None derives OSWORLD_<FLAG>
+    env: str | None = None
     read: bool = True  # read the default from the environment
 
     @property
@@ -99,24 +108,15 @@ class Opt:
 
     @property
     def env_name(self) -> str:
-        return self.env or "OSWORLD_" + self.attr.upper()
+        return self.env or "ENV_FLEET_" + self.attr.upper()
 
 
 OPTION_HELP = {
-    "max_tasks": "Maximum number of task JSONs exposed by each env replica.",
-    "artifact_output_dir": "Artifact root baked into env-worker harness configs.",
-    "desktop_pool_min_ready_sessions": "Ready desktop sessions kept warm per worker.",
-    "desktop_pool_max_sessions": "Maximum desktop sessions per env worker.",
-    "desktop_pool_max_rollouts_per_session": "Retire a session after N rollouts.",
-    "desktop_pool_checkout_timeout": "Seconds to wait for a ready desktop session.",
-    "desktop_pool_lease_timeout": "Seconds a leased session may idle before reset.",
-    "desktop_pool_startup_timeout": "Seconds to allow one desktop startup.",
-    "desktop_pool_startup_retry_backoff": "Seconds before retrying a failed startup.",
-    "desktop_pool_startup_retry_backoff_max": "Cap for exponential startup backoff.",
-    "desktop_pool_status_heartbeat_interval": "Seconds between status heartbeats.",
-    "desktop_pool_root": "Shared pool root for status, logs, and port locks.",
-    "desktop_pool_runtime_dir": "Node-local runtime root for QEMU workdirs/sockets.",
-    "desktop_pool_log_runtime_dir": "Short node-local path for persistent desktop logs.",
+    "fleet_unhealthy_s": "Seconds the whole fleet may stay unhealthy before restart.",
+    "gateway_request_timeout_s": "Seconds before an in-flight request is failed.",
+    "max_fleet_restarts": "Maximum whole-fleet restarts before giving up.",
+    "replica_unhealthy_s": "Seconds a replica may stay unhealthy before restart.",
+    "status_stale_after_s": "Seconds before a pool status file is stale.",
 }
 
 
@@ -156,15 +156,18 @@ def env_value(
         ) from exc
 
 
-def env_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
-    value = env.get(key)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def env_int(env: Mapping[str, str], key: str) -> int | None:
     return env_value(env, key, int, None)
+
+
+def positive_int(value: str) -> int:
+    try:
+        resolved = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if resolved < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return resolved
 
 
 def first_env_int(
@@ -192,93 +195,33 @@ def write_json_atomic(path: Path, payload: MappingLike) -> None:
     tmp.replace(path)
 
 
-def osworld_root(env: Mapping[str, str] = os.environ) -> Path:
-    """Return the OSWorld checkout, defaulting to a sibling OSWorldRL."""
-    if value := env.get("OSWORLD_ROOT"):
-        return require_absolute_path(value, name="OSWORLD_ROOT")
-    return project_root(env).parent / "OSWorldRL"
-
-
-def osworld_task_base_path(env: Mapping[str, str] = os.environ) -> Path:
-    return (
-        osworld_root(env=env)
-        / "evaluation_examples"
-        / "examples"
-        / "target_box_empty_desktop"
-    )
-
-
-def osworld_deployment_root(env: Mapping[str, str] = os.environ) -> Path:
-    if value := env.get("OSWORLD_DEPLOYMENT_ROOT"):
-        return require_absolute_path(value, name="OSWORLD_DEPLOYMENT_ROOT")
-    return osworld_root(env).parent / "osworld_deployment"
-
-
-def osworld_qcow_path(env: Mapping[str, str] = os.environ) -> Path:
-    if value := env.get("OSWORLD_QCOW_PATH"):
-        return require_absolute_path(value, name="OSWORLD_QCOW_PATH")
-    return osworld_deployment_root(env) / "Ubuntu.qcow2"
-
-
-def osworld_asset_cache_dir(env: Mapping[str, str] = os.environ) -> Path:
-    return scratch_subdir("osworld_asset_cache", env=env)
-
-
-def default_task_base_path(env: Mapping[str, str]) -> Path:
-    return osworld_task_base_path(env=env)
-
-
-def default_asset_cache_dir(env: Mapping[str, str]) -> Path:
-    return osworld_asset_cache_dir(env=env)
-
-
-def script_path(name: str) -> str:
-    return str(project_root() / "scripts" / name)
-
-
 def broker_command(python: str) -> list[str]:
     return [python, "-m", BROKER_MODULE]
 
 
 PREPARE_OPTIONS: tuple[Opt, ...] = (
-    Opt("--bind-host", str, "0.0.0.0", "OSWORLD_FLEET_BIND_HOST"),
-    Opt("--base-port", int, 5200, "OSWORLD_FLEET_BASE_PORT"),
+    Opt("--bind-host", str, "0.0.0.0", "ENV_FLEET_BIND_HOST"),
+    Opt("--base-port", int, 5200, "ENV_FLEET_BASE_PORT"),
     Opt("--node-rank", int, 0, "SLURM_PROCID"),
-    Opt("--servers-per-node", int, 1, "OSWORLD_ENV_SERVERS_PER_NODE"),
-    Opt("--workers-per-server", int, 1, "OSWORLD_ENV_WORKERS_PER_SERVER"),
-    Opt("--replica-count", int, 0, "OSWORLD_ENV_REPLICA_COUNT"),
-    Opt("--replica-offset", int, -1, "OSWORLD_ENV_REPLICA_OFFSET"),
-    Opt("--replica-hosts", str, "", "OSWORLD_ENV_REPLICA_HOSTS"),
+    Opt("--servers-per-node", positive_int, 1, "ENV_FLEET_SERVERS_PER_NODE"),
+    Opt("--workers-per-server", positive_int, 1, "ENV_FLEET_WORKERS_PER_SERVER"),
+    Opt("--replica-offset", int, -1, "ENV_FLEET_REPLICA_OFFSET"),
+    Opt("--replica-hosts", str, "", "ENV_FLEET_REPLICA_HOSTS"),
     Opt("--gateway-host", str, None),
     Opt("--gateway-bind-host", str, None),
     Opt("--gateway-port", int, 0),
-    Opt("--env-id", str, "rl"),
-    Opt("--env-name-prefix", str, "osworld-target-box"),
-    Opt("--max-tasks", int, 0),
-    Opt("--shuffle-seed", int, 0, "OSWORLD_TASK_SHUFFLE_SEED"),
-    Opt("--max-steps", int, 7, read=False),
-    Opt("--screen-width", int, 1920),
-    Opt("--screen-height", int, 1080),
-    Opt("--screenshot-timeout", float, 60.0),
-    Opt("--artifact-output-dir", Path, None, "OSWORLD_ARTIFACT_DIR"),
-    Opt("--desktop-pool-min-ready-sessions", int, 1),
-    Opt("--desktop-pool-max-sessions", int, 1),
-    Opt("--desktop-pool-max-rollouts-per-session", int, 1),
-    Opt("--desktop-pool-checkout-timeout", float, 900.0),
-    Opt("--desktop-pool-lease-timeout", float, 300.0),
-    Opt("--desktop-pool-startup-timeout", float, 1200.0),
-    Opt("--desktop-pool-startup-retry-backoff", float, 30.0),
-    Opt("--desktop-pool-startup-retry-backoff-max", float, 300.0),
-    Opt("--desktop-pool-status-heartbeat-interval", float, 10.0),
-    Opt("--desktop-pool-runtime-dir", Path, None),
-    Opt("--desktop-pool-log-runtime-dir", Path, None),
-    Opt("--rollout-timeout", float, 900.0),
-    Opt("--env-max-retries", int, 2),
 )
 
 
 def prepare_main(argv: Sequence[str] | None = None) -> int:
     args = parse_prepare_args(argv)
+    environment = read_environment_contract(args.environment_contract)
+    enforce_vm_memory_budget(
+        os.environ,
+        servers_per_node=args.servers_per_node,
+        workers_per_server=args.workers_per_server,
+        min_ready_sessions=environment.session.min_ready_sessions,
+    )
     layout = resolve_prepare_layout(args)
     args.run_root = layout.run_root
     args.registry = layout.registry_path
@@ -289,7 +232,7 @@ def prepare_main(argv: Sequence[str] | None = None) -> int:
     config_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    replica_count = args.replica_count or args.servers_per_node
+    replica_count = args.replica_count
     replica_offset = args.replica_offset
     if replica_offset < 0:
         replica_offset = args.node_rank * args.servers_per_node
@@ -303,15 +246,15 @@ def prepare_main(argv: Sequence[str] | None = None) -> int:
         workers_per_server=args.workers_per_server,
         replica_count=replica_count,
         replica_offset=replica_offset,
-        name_prefix=args.env_name_prefix,
+        name_prefix=environment.source.name,
         config_dir=config_dir,
         log_dir=log_dir,
         pool_status_root=layout.pool_status_dir,
     )
 
-    metadata = registry_metadata(args, layout, replica_count)
+    metadata = registry_metadata(args, layout, replica_count, environment)
     for spec in specs:
-        write_env_server_config(spec, args, metadata)
+        write_env_server_config(spec, environment.session)
 
     registry = upsert_registry(
         path=layout.registry_path,
@@ -339,25 +282,25 @@ def parse_prepare_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     # writes its registry, so it is the one that must not accept an unnamed run:
     # two off-scheduler runs would both land on the fallback id, share one
     # registry and one pool status tree, and sum each other's ready counts.
-    named_run_id = env.get("OSWORLD_FLEET_RUN_ID") or env.get("SLURM_JOB_ID")
+    named_run_id = env.get("ENV_FLEET_RUN_ID") or env.get("SLURM_JOB_ID")
     parser.add_argument("--run-id", default=named_run_id, required=named_run_id is None)
     parser.add_argument("--run-base", type=Path, default=layout.run_base)
     parser.add_argument(
-        "--run-root", type=Path, default=env_path(env, "OSWORLD_FLEET_RUN_ROOT")
+        "--run-root", type=Path, default=env_path(env, "ENV_FLEET_RUN_ROOT")
     )
     parser.add_argument(
-        "--registry", type=Path, default=env_path(env, "OSWORLD_ENV_FLEET_REGISTRY")
+        "--registry", type=Path, default=env_path(env, "ENV_FLEET_REGISTRY")
     )
     parser.add_argument(
-        "--configs-dir", type=Path, default=env_path(env, "OSWORLD_FLEET_CONFIGS_DIR")
+        "--configs-dir", type=Path, default=env_path(env, "ENV_FLEET_CONFIGS_DIR")
     )
     parser.add_argument(
-        "--logs-dir", type=Path, default=env_path(env, "OSWORLD_FLEET_LOGS_DIR")
+        "--logs-dir", type=Path, default=env_path(env, "ENV_FLEET_LOGS_DIR")
     )
     parser.add_argument(
         "--pool-status-dir",
         type=Path,
-        default=env_path(env, "OSWORLD_DESKTOP_POOL_STATUS_DIR"),
+        default=env_path(env, "ENV_FLEET_DESKTOP_POOL_STATUS_DIR"),
     )
     parser.add_argument(
         "--consumer-path",
@@ -367,20 +310,31 @@ def parse_prepare_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Opaque consumer path recorded in registry layout metadata.",
     )
     parser.add_argument(
-        "--host", default=env.get("OSWORLD_FLEET_HOST") or default_public_host()
+        "--host", default=env.get("ENV_FLEET_HOST") or default_public_host()
+    )
+    contract_path = env.get(ENVIRONMENT_CONTRACT_ENV)
+    parser.add_argument(
+        "--environment-contract",
+        type=Path,
+        default=Path(contract_path) if contract_path else None,
+        required=contract_path is None,
     )
     add_options(parser, PREPARE_OPTIONS, env)
+    raw_replica_count = env.get("ENV_FLEET_REPLICA_COUNT")
+    replica_count = (
+        positive_int(raw_replica_count) if raw_replica_count is not None else None
+    )
+    parser.add_argument(
+        "--replica-count",
+        type=positive_int,
+        default=replica_count,
+        required=replica_count is None,
+    )
     parser.add_argument(
         "--desktop-pool-root",
         type=Path,
-        default=env_path(env, "OSWORLD_DESKTOP_POOL_ROOT"),
+        default=env_path(env, "ENV_FLEET_DESKTOP_POOL_ROOT"),
     )
-    parser.add_argument("--osworld-root", type=Path, default=osworld_root(env=env))
-    parser.add_argument("--qcow-path", type=Path, default=osworld_qcow_path(env=env))
-    parser.add_argument(
-        "--cache-dir", type=Path, default=osworld_asset_cache_dir(env=env)
-    )
-    parser.set_defaults(task_base_path=osworld_task_base_path(env=env))
     args = parser.parse_args(argv)
     args.consumer_paths = {
         **layout.consumer_paths,
@@ -408,65 +362,23 @@ def registry_metadata(
     args: argparse.Namespace,
     layout: FleetRunLayout,
     replica_count: int,
+    environment: EnvironmentContract,
 ) -> dict[str, Any]:
     """Build the static service contract written to the fleet registry."""
     return {
         "run_id": args.run_id,
-        "env_id": args.env_id,
-        "env_name_prefix": args.env_name_prefix,
-        "task_base_path": str(args.task_base_path),
-        "max_tasks": args.max_tasks,
-        "shuffle_seed": args.shuffle_seed,
-        "harness": harness_config(args),
+        "environment": environment.as_metadata(),
         "gateway": gateway_config(args, replica_count),
         "layout": layout.as_metadata(),
         "expected_env_servers": replica_count,
         "expected_env_workers": replica_count * args.workers_per_server,
-        "expected_ready_sessions": expected_ready_sessions(args, replica_count),
+        "expected_ready_sessions": expected_ready_sessions(
+            workers_per_server=args.workers_per_server,
+            replica_count=replica_count,
+            min_ready_sessions=environment.session.min_ready_sessions,
+        ),
         "slurm": slurm_metadata(os.environ),
     }
-
-
-def harness_config(args: argparse.Namespace) -> dict[str, Any]:
-    desktop_pool_config = {
-        "min_ready_sessions": args.desktop_pool_min_ready_sessions,
-        "max_sessions": args.desktop_pool_max_sessions,
-        "max_rollouts_per_session": args.desktop_pool_max_rollouts_per_session,
-        "checkout_timeout_s": args.desktop_pool_checkout_timeout,
-        "lease_timeout_s": args.desktop_pool_lease_timeout,
-        "startup_timeout_s": args.desktop_pool_startup_timeout,
-        "startup_retry_backoff_s": args.desktop_pool_startup_retry_backoff,
-        "startup_retry_backoff_max_s": (args.desktop_pool_startup_retry_backoff_max),
-        "status_heartbeat_interval_s": (args.desktop_pool_status_heartbeat_interval),
-        "root_dir": str(args.desktop_pool_root),
-    }
-    for attr, key in (
-        ("desktop_pool_runtime_dir", "runtime_dir"),
-        ("desktop_pool_log_runtime_dir", "log_runtime_dir"),
-    ):
-        value = getattr(args, attr, None)
-        if value is not None:
-            desktop_pool_config[key] = str(value)
-    return {
-        "max_steps": args.max_steps,
-        "desktop": {
-            "screen_width": args.screen_width,
-            "screen_height": args.screen_height,
-            "screenshot_timeout": args.screenshot_timeout,
-            "cache_dir": str(args.cache_dir),
-            "output_dir": str(resolve_artifact_output_dir(args)),
-            "osworld_root": str(args.osworld_root),
-            "qcow_path": str(args.qcow_path),
-            "desktop_pool_config": desktop_pool_config,
-        },
-    }
-
-
-def resolve_artifact_output_dir(args: argparse.Namespace) -> Path:
-    output_dir = args.artifact_output_dir
-    if output_dir is not None:
-        return Path(output_dir)
-    return args.run_root / "artifacts"
 
 
 def gateway_config(args: argparse.Namespace, replica_count: int) -> dict[str, Any]:
@@ -514,11 +426,117 @@ def split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def expected_ready_sessions(args: argparse.Namespace, replica_count: int) -> int:
+def enforce_vm_memory_budget(
+    env: Mapping[str, str],
+    *,
+    servers_per_node: int,
+    workers_per_server: int,
+    min_ready_sessions: int,
+) -> None:
+    """Refuse a node whose Slurm memory cannot hold the desktops it plans.
+
+    Every warm session is a whole QEMU guest, so the requirement is the product
+    of the three counts, not any one of them. Unchecked, the node starts, boots
+    desktops until the cgroup OOM-kills one, and reports it as a flaky pool.
+    """
+    available_gb = slurm_memory_gb(env)
+    if available_gb is None:
+        return
+    vm_mem_gb = int(env.get("ENV_FLEET_DESKTOP_VM_HOST_MEM_GB") or "25")
+    planned_vms = servers_per_node * workers_per_server * min_ready_sessions
+    required_gb = planned_vms * vm_mem_gb
+    if required_gb > available_gb:
+        raise ValueError(
+            f"this fleet node plans {planned_vms} desktop VMs "
+            f"({servers_per_node} servers x {workers_per_server} workers x "
+            f"{min_ready_sessions} ready sessions) needing {required_gb} GB "
+            f"at {vm_mem_gb} GB per VM, but its Slurm allocation is "
+            f"{available_gb} GB; raise ENV_FLEET_SLURM_MEM_PER_NODE / the "
+            f"fleet sbatch --mem, lower ENV_FLEET_WORKERS_PER_SERVER or the "
+            "contract's min_ready_sessions, or set "
+            f"ENV_FLEET_DESKTOP_VM_HOST_MEM_GB for genuinely smaller VMs"
+        )
+
+
+def expected_ready_sessions(
+    *,
+    workers_per_server: int,
+    replica_count: int,
+    min_ready_sessions: int,
+) -> int:
     """Compute the mandatory warm sessions required before consumer launch."""
-    return (
-        replica_count * args.workers_per_server * args.desktop_pool_min_ready_sessions
+    return replica_count * workers_per_server * min_ready_sessions
+
+
+def launch_main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Prepare and supervise one node of a Slurm env fleet."
     )
+    parser.parse_args(argv)
+    env = os.environ
+    allocated_nodes = _required_positive_env(env, "ENV_FLEET_ALLOCATED_NODES")
+    slurm_nodes = _required_positive_env(
+        env,
+        "SLURM_JOB_NUM_NODES" if env.get("SLURM_JOB_NUM_NODES") else "SLURM_NNODES",
+    )
+    if allocated_nodes != slurm_nodes:
+        raise ValueError(
+            f"fleet allocation has {slurm_nodes} nodes; expected {allocated_nodes}"
+        )
+    servers_per_node = _required_positive_env(env, "ENV_FLEET_SERVERS_PER_NODE")
+    replica_count = _required_positive_env(env, "ENV_FLEET_REPLICA_COUNT")
+    expected_replicas = allocated_nodes * servers_per_node
+    if replica_count != expected_replicas:
+        raise ValueError(
+            f"fleet topology requires {expected_replicas} replicas, got {replica_count}"
+        )
+    node_rank = int(env.get("SLURM_PROCID", "-1"))
+    if node_rank < 0 or node_rank >= allocated_nodes:
+        raise ValueError(f"SLURM_PROCID is outside the fleet allocation: {node_rank}")
+
+    prepare_main([])
+
+    layout = FleetRunLayout.from_env(env)
+    env_server_bin = Path(sys.executable).with_name("serve")
+    if not env_server_bin.is_file():
+        raise RuntimeError(f"serve is missing beside the fleet Python: {env_server_bin}")
+    supervisor_args = [
+        "--config-dir",
+        str(layout.node_configs_dir(node_rank)),
+        "--logs-dir",
+        str(layout.node_logs_dir(node_rank)),
+        "--registry",
+        str(layout.registry_path),
+        "--env-server-bin",
+        str(env_server_bin),
+        "--python",
+        sys.executable,
+        "--run-root",
+        str(layout.run_root),
+    ]
+    if node_rank == 0:
+        supervisor_args.extend(
+            [
+                "--start-gateway",
+                "--gateway-log",
+                str(layout.logs_dir / "rollout-gateway.stdout.log"),
+            ]
+        )
+    for opt in SUBMIT_OPTIONS:
+        supervisor_args.extend(
+            [opt.flag, str(env_value(env, opt.env_name, opt.kind, opt.default))]
+        )
+    return supervise_main(supervisor_args)
+
+
+def _required_positive_env(env: Mapping[str, str], name: str) -> int:
+    value = env.get(name)
+    if value is None:
+        raise ValueError(f"{name} is required")
+    try:
+        return positive_int(value)
+    except argparse.ArgumentTypeError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
 
 
 @dataclass(frozen=True)
@@ -644,6 +662,71 @@ def parse_supervise_args(argv: Sequence[str] | None = None) -> argparse.Namespac
     return parser.parse_args(argv)
 
 
+def _validate_local_runtime_root(path: Path) -> Path:
+    """Accept only the derived job- and node-owned root, and only unsymlinked.
+
+    Every destructive step below goes through here first: a root reached via a
+    symlink at any level, or one that is not the path this task derives for
+    itself, is somebody else's directory.
+    """
+    scope = local_runtime_scope(os.environ)
+    candidate = Path(os.path.abspath(path))
+    if candidate != scope.runtime_root:
+        raise RuntimeError(
+            "local runtime root must exactly match the derived job- and "
+            f"node-owned root ({scope.runtime_root}), got {path}"
+        )
+    _refuse_symlinked_runtime_scope(scope)
+    return candidate
+
+
+def _refuse_symlinked_runtime_scope(scope: LocalRuntimeScope) -> None:
+    for candidate in (scope.job_root, scope.node_root, scope.runtime_root):
+        if candidate.is_symlink():
+            raise RuntimeError(
+                f"Refusing symlink in local runtime ownership path: {candidate}"
+            )
+
+
+def _runtime_owner_path(path: Path) -> Path:
+    return path / LOCAL_RUNTIME_OWNER_FILE
+
+
+def _write_local_runtime_owner(path: Path) -> None:
+    validated = _validate_local_runtime_root(path)
+    write_json_atomic(
+        _runtime_owner_path(validated),
+        local_runtime_scope(os.environ).owner_payload,
+    )
+
+
+def _require_local_runtime_owner(path: Path) -> None:
+    marker = _runtime_owner_path(path)
+    if marker.is_symlink() or not marker.is_file():
+        raise RuntimeError(f"Refusing to remove unowned local runtime root: {path}")
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Invalid local runtime ownership marker: {marker}"
+        ) from error
+    expected = local_runtime_scope(os.environ).owner_payload
+    if payload != expected:
+        raise RuntimeError(
+            f"Local runtime ownership marker does not match this task: {marker}"
+        )
+
+
+def _remove_local_runtime_root(path: Path) -> None:
+    validated = _validate_local_runtime_root(path)
+    if not validated.exists():
+        return
+    if not validated.is_dir():
+        raise RuntimeError(f"Refusing to remove non-directory runtime root: {validated}")
+    _require_local_runtime_owner(validated)
+    shutil.rmtree(validated)
+
+
 class FleetSupervisor:
     def __init__(self, *, args: argparse.Namespace, policy: SupervisorPolicy):
         self.args = args
@@ -657,12 +740,14 @@ class FleetSupervisor:
         self.run_root = args.run_root or args.registry.parent
         self.status_path = args.logs_dir / "supervisor_status.json"
         self.unrecoverable_path = self.run_root / "fleet_unrecoverable.json"
+        self.local_runtime_root = local_runtime_scope(os.environ).runtime_root
         self.replicas = self.load_replicas()
 
     def run(self) -> int:
         self.args.logs_dir.mkdir(parents=True, exist_ok=True)
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.install_signal_handlers()
+        self.prepare_local_runtime_root()
 
         try:
             self.start_replicas(self.replicas, reason="initial start")
@@ -681,7 +766,30 @@ class FleetSupervisor:
             self.stop_gateway()
             self.stop_replicas(self.replicas)
             self.write_status(time.monotonic())
+            self.cleanup_local_runtime_root()
         return 0
+
+    def prepare_local_runtime_root(self) -> None:
+        """Remove stale allocation state before starting any replica."""
+        try:
+            _remove_local_runtime_root(self.local_runtime_root)
+            self.local_runtime_root.mkdir(parents=True)
+            _write_local_runtime_owner(self.local_runtime_root)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to clean local runtime root before starting replicas: "
+                f"{self.local_runtime_root}"
+            ) from exc
+
+    def cleanup_local_runtime_root(self) -> None:
+        """Best-effort removal after every owned process group has stopped."""
+        try:
+            _remove_local_runtime_root(self.local_runtime_root)
+        except Exception:
+            self.logger.exception(
+                "Failed to remove local runtime root during shutdown: %s",
+                self.local_runtime_root,
+            )
 
     def install_signal_handlers(self) -> None:
         def request_stop(_signum: int, _frame: Any) -> None:
@@ -1212,35 +1320,20 @@ def archive_status_files(status_dir: Path | None, replica_name: str) -> Path | N
 
 
 SUBMIT_OPTIONS: tuple[Opt, ...] = (
-    Opt("--desktop-pool-min-ready-sessions", int, 1),
-    Opt("--desktop-pool-max-sessions", int, 64, read=False),
-    Opt("--desktop-pool-max-rollouts-per-session", int, 32, read=False),
-    Opt("--desktop-pool-checkout-timeout", float, 500, read=False),
-    Opt("--desktop-pool-lease-timeout", float, 300.0),
-    Opt("--desktop-pool-startup-timeout", float, 1200.0),
-    Opt("--desktop-pool-startup-retry-backoff", float, 30.0),
-    Opt("--desktop-pool-startup-retry-backoff-max", float, 300.0),
-    Opt("--desktop-pool-status-heartbeat-interval", float, 10.0),
-    Opt("--desktop-pool-root", Path, None),
-    Opt("--desktop-pool-runtime-dir", Path, None),
-    Opt("--desktop-pool-log-runtime-dir", Path, None),
-    Opt("--rollout-timeout", float, 900.0),
-    Opt("--env-max-retries", int, 2),
-    Opt("--replica-unhealthy-s", float, 120.0, "OSWORLD_SUPERVISOR_REPLICA_UNHEALTHY_S"),
-    Opt("--fleet-unhealthy-s", float, 300.0, "OSWORLD_SUPERVISOR_FLEET_UNHEALTHY_S"),
-    Opt("--max-fleet-restarts", int, 3, "OSWORLD_SUPERVISOR_MAX_FLEET_RESTARTS"),
+    Opt("--replica-unhealthy-s", float, 120.0, "ENV_FLEET_SUPERVISOR_REPLICA_UNHEALTHY_S"),
+    Opt("--fleet-unhealthy-s", float, 300.0, "ENV_FLEET_SUPERVISOR_FLEET_UNHEALTHY_S"),
+    Opt("--max-fleet-restarts", int, 3, "ENV_FLEET_SUPERVISOR_MAX_FLEET_RESTARTS"),
     Opt("--gateway-request-timeout-s", float, 900.0),
     Opt("--status-stale-after-s", float, 120.0),
 )
 
 # Fleet-shape exports whose CLI names and env names diverge.
 SUBMIT_SHAPE_EXPORTS: tuple[tuple[str, str], ...] = (
-    ("run_id", "OSWORLD_FLEET_RUN_ID"),
-    ("servers_per_node", "OSWORLD_ENV_SERVERS_PER_NODE"),
-    ("workers_per_server", "OSWORLD_ENV_WORKERS_PER_SERVER"),
-    ("base_port", "OSWORLD_FLEET_BASE_PORT"),
-    ("max_tasks", "OSWORLD_MAX_TASKS"),
-    ("artifact_output_dir", "OSWORLD_ARTIFACT_DIR"),
+    ("run_id", "ENV_FLEET_RUN_ID"),
+    ("servers_per_node", "ENV_FLEET_SERVERS_PER_NODE"),
+    ("workers_per_server", "ENV_FLEET_WORKERS_PER_SERVER"),
+    ("base_port", "ENV_FLEET_BASE_PORT"),
+    ("environment_contract", ENVIRONMENT_CONTRACT_ENV),
 )
 
 
@@ -1255,67 +1348,58 @@ def parse_fleet_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     submit_parser = subparsers.add_parser("submit", help="Submit the fleet Slurm job.")
     submit_parser.add_argument("--script", type=Path, default=DEFAULT_FLEET_SCRIPT)
-    submit_parser.add_argument("--run-id", default=env.get("OSWORLD_FLEET_RUN_ID"))
+    submit_parser.add_argument("--run-id", default=env.get("ENV_FLEET_RUN_ID"))
     submit_parser.add_argument("--run-base", type=Path, default=defaults.run_base)
-    submit_parser.set_defaults(task_base_path=default_task_base_path(env))
-    submit_parser.set_defaults(asset_cache_dir=default_asset_cache_dir(env))
+    contract_path = env.get(ENVIRONMENT_CONTRACT_ENV)
     submit_parser.add_argument(
-        "--asset-source-root",
+        "--environment-contract",
         type=Path,
-        default=env.get("OSWORLD_ASSET_SOURCE_ROOT"),
-    )
-    submit_parser.add_argument(
-        "--prefetch-assets",
-        action=argparse.BooleanOptionalAction,
-        default=env_bool(env, "OSWORLD_PREFETCH_ASSETS", True),
-        help=(
-            "Populate the task-asset cache before submitting the fleet, so compute "
-            "nodes do not need external Hugging Face access."
-        ),
+        default=Path(contract_path) if contract_path else None,
+        required=contract_path is None,
     )
     submit_parser.add_argument("--account", default=env.get("SBATCH_ACCOUNT"))
     submit_parser.add_argument(
         "--partition",
-        default=env.get("OSWORLD_FLEET_SLURM_PARTITION") or env.get("SBATCH_PARTITION"),
+        default=env.get("ENV_FLEET_SLURM_PARTITION") or env.get("SBATCH_PARTITION"),
     )
     submit_parser.add_argument(
         "--time",
-        default=env.get("OSWORLD_FLEET_SLURM_TIME")
+        default=env.get("ENV_FLEET_SLURM_TIME")
         or env.get("SBATCH_TIMELIMIT")
         or "24:00:00",
     )
+    default_nodes = first_env_int(env, "ENV_FLEET_SLURM_NODES", "SBATCH_NODES")
+    if default_nodes is not None:
+        default_nodes = positive_int(str(default_nodes))
     submit_parser.add_argument(
         "--nodes",
-        type=int,
-        default=first_env_int(env, "OSWORLD_FLEET_SLURM_NODES", "SBATCH_NODES"),
+        type=positive_int,
+        default=default_nodes,
+        required=default_nodes is None,
     )
     submit_parser.add_argument(
         "--cpus-per-task",
         type=int,
         default=first_env_int(
             env,
-            "OSWORLD_FLEET_SLURM_CPUS_PER_TASK",
+            "ENV_FLEET_SLURM_CPUS_PER_TASK",
             "SBATCH_CPUS_PER_TASK",
             default=48,
         ),
     )
     submit_parser.add_argument(
         "--mem",
-        default=env.get("OSWORLD_FLEET_SLURM_MEM_PER_NODE")
+        default=env.get("ENV_FLEET_SLURM_MEM_PER_NODE")
         or env.get("SBATCH_MEM_PER_NODE")
         or "128G",
     )
     submit_parser.add_argument("--job-name", default=DEFAULT_JOB_NAME)
-    submit_parser.add_argument("--servers-per-node", type=int, default=8)
-    submit_parser.add_argument("--workers-per-server", type=int, default=4)
+    submit_parser.add_argument("--servers-per-node", type=positive_int, default=8)
+    submit_parser.add_argument("--workers-per-server", type=positive_int, default=4)
     submit_parser.add_argument("--base-port", type=int)
     add_options(
         submit_parser,
-        (
-            Opt("--max-tasks", int, 0),
-            Opt("--artifact-output-dir", Path, None, "OSWORLD_ARTIFACT_DIR"),
-            *SUBMIT_OPTIONS,
-        ),
+        SUBMIT_OPTIONS,
         env,
     )
     submit_parser.add_argument("--dry-run", action="store_true")
@@ -1324,11 +1408,10 @@ def parse_fleet_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     add_layout_args(status_parser, defaults)
     status_parser.add_argument("--job-name", default=DEFAULT_JOB_NAME)
     status_parser.add_argument("--expected-servers", type=int, default=0)
-    status_parser.add_argument("--min-ready-sessions", type=int, default=-1)
     status_parser.add_argument(
         "--status-stale-after-s",
         type=float,
-        default=env_value(env, "OSWORLD_STATUS_STALE_AFTER_S", float, 120.0),
+        default=env_value(env, "ENV_FLEET_STATUS_STALE_AFTER_S", float, 120.0),
     )
 
     cancel_parser = subparsers.add_parser(
@@ -1367,10 +1450,9 @@ def submit(
     *,
     trainer_section_factory: TrainerSectionFactory | None = None,
 ) -> int:
+    read_environment_contract(args.environment_contract)
     command = build_sbatch_command(args)
     if args.dry_run:
-        if args.prefetch_assets:
-            print(format_shell_command(build_prefetch_command(args)))
         print(format_shell_command(command))
         trainer_section = resolve_trainer_section(
             trainer_section_factory, dry_run_layout(args)
@@ -1383,11 +1465,6 @@ def submit(
             )
             print(trainer_section)
         return 0
-
-    if args.prefetch_assets:
-        prefetch_result = subprocess.run(build_prefetch_command(args), check=False)
-        if prefetch_result.returncode != 0:
-            return prefetch_result.returncode
 
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -1418,7 +1495,11 @@ def build_sbatch_command(args: argparse.Namespace) -> list[str]:
             command.extend([option, str(value)])
 
     arg_values = vars(args)
-    exports = {"OSWORLD_RUN_BASE": str(args.run_base)}
+    exports = {
+        "ENV_FLEET_RUN_BASE": str(args.run_base),
+        "ENV_FLEET_ALLOCATED_NODES": str(args.nodes),
+        "ENV_FLEET_REPLICA_COUNT": str(args.nodes * args.servers_per_node),
+    }
     for attr, env_name in SUBMIT_SHAPE_EXPORTS:
         if (value := arg_values.get(attr)) is not None:
             exports[env_name] = str(value)
@@ -1429,22 +1510,6 @@ def build_sbatch_command(args: argparse.Namespace) -> list[str]:
     command.append(f"--export=ALL,{rendered_exports}")
     command.append(str(args.script))
     return command
-
-
-def build_prefetch_command(args: argparse.Namespace) -> list[str]:
-    command = [
-        *UV_PYTHON_COMMAND,
-        script_path("prefetch_osworld_assets.py"),
-        "--tasks",
-        str(args.task_base_path),
-        "--cache-dir",
-        str(args.asset_cache_dir),
-    ]
-    if args.asset_source_root is not None:
-        command.extend(["--source-root", str(args.asset_source_root)])
-    return command
-
-
 def parse_sbatch_job_id(output: str) -> str:
     first = output.strip().splitlines()[0]
     return first.split(";", 1)[0]
@@ -1503,7 +1568,6 @@ def status(args: argparse.Namespace) -> int:
             registry=layout.registry_path,
             status_dir=None,
             pool_status_dir=layout.pool_status_dir,
-            min_ready_sessions=args.min_ready_sessions,
             expected_servers=args.expected_servers,
             status_stale_after_s=args.status_stale_after_s,
         )
@@ -1676,13 +1740,15 @@ def main(
     *,
     trainer_section_factory: TrainerSectionFactory | None = None,
 ) -> int:
-    """Dispatch ``prepare`` / ``run`` / ``submit`` / ``status`` / ``cancel``."""
+    """Dispatch fleet lifecycle commands."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     command = arguments[0] if arguments else ""
     if command == "prepare":
         return prepare_main(arguments[1:])
     if command == "run":
         return supervise_main(arguments[1:])
+    if command == "launch":
+        return launch_main(arguments[1:])
     args = parse_fleet_args(arguments)
     if args.command == "submit":
         return submit(args, trainer_section_factory=trainer_section_factory)

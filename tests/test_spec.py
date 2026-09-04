@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from desktop_fleet.environment import EnvironmentContract
 from desktop_fleet.spec import (
     FleetRunLayout,
     default_public_host,
@@ -16,14 +16,13 @@ from desktop_fleet.spec import (
     render_consumer_paths,
     scratch_root,
     scratch_subdir,
-    toml_literal,
     write_env_server_config,
 )
 
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
 def test_fleet_run_layout_uses_readable_default_paths(tmp_path):
@@ -57,11 +56,11 @@ def test_fleet_run_layout_rejects_relative_constructor_paths(tmp_path):
 def test_fleet_run_layout_honors_environment_overrides(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "run-a",
-        "OSWORLD_RUN_BASE": str(tmp_path / "base"),
-        "OSWORLD_FLEET_RUN_ROOT": str(tmp_path / "custom-desktop-fleet"),
-        "OSWORLD_DESKTOP_POOL_ROOT": str(tmp_path / "custom-desktop-pool"),
-        "OSWORLD_ENV_FLEET_REGISTRY": str(tmp_path / "registry.json"),
+        "ENV_FLEET_RUN_ID": "run-a",
+        "ENV_FLEET_RUN_BASE": str(tmp_path / "base"),
+        "ENV_FLEET_RUN_ROOT": str(tmp_path / "custom-desktop-fleet"),
+        "ENV_FLEET_DESKTOP_POOL_ROOT": str(tmp_path / "custom-desktop-pool"),
+        "ENV_FLEET_REGISTRY": str(tmp_path / "registry.json"),
     }
 
     layout = FleetRunLayout.from_env(env)
@@ -77,7 +76,7 @@ def test_fleet_run_layout_honors_environment_overrides(tmp_path):
 def test_fleet_run_layout_defaults_to_short_scratch_run_base(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "run-a",
+        "ENV_FLEET_RUN_ID": "run-a",
     }
 
     layout = FleetRunLayout.from_env(env)
@@ -89,12 +88,12 @@ def test_fleet_run_layout_defaults_to_short_scratch_run_base(tmp_path):
 def test_fleet_run_layout_keeps_explicit_paths_literal(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "13969570",
-        "OSWORLD_RUN_BASE": str(tmp_path / "shared" / "osworld_rl"),
-        "OSWORLD_FLEET_RUN_ROOT": str(tmp_path / "custom" / "env_fleet"),
-        "OSWORLD_ENV_FLEET_REGISTRY": str(tmp_path / "custom" / "registry.json"),
-        "OSWORLD_DESKTOP_POOL_ROOT": str(tmp_path / "custom" / "desktop_pool"),
-        "OSWORLD_DESKTOP_POOL_STATUS_DIR": str(tmp_path / "custom" / "status"),
+        "ENV_FLEET_RUN_ID": "13969570",
+        "ENV_FLEET_RUN_BASE": str(tmp_path / "shared" / "osworld_rl"),
+        "ENV_FLEET_RUN_ROOT": str(tmp_path / "custom" / "env_fleet"),
+        "ENV_FLEET_REGISTRY": str(tmp_path / "custom" / "registry.json"),
+        "ENV_FLEET_DESKTOP_POOL_ROOT": str(tmp_path / "custom" / "desktop_pool"),
+        "ENV_FLEET_DESKTOP_POOL_STATUS_DIR": str(tmp_path / "custom" / "status"),
     }
 
     layout = FleetRunLayout.from_env(env)
@@ -120,7 +119,7 @@ def test_fleet_run_layout_defaults_without_scratch_or_project(monkeypatch):
 def test_fleet_run_layout_carries_opaque_consumer_paths(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "run-a",
+        "ENV_FLEET_RUN_ID": "run-a",
         "ENV_FLEET_CONSUMER_PATHS": (
             f"trainer_config_path={tmp_path / 'trainer.toml'},"
             f"trainer_output_dir={tmp_path / 'out'}"
@@ -181,7 +180,7 @@ def test_make_server_specs_assigns_ports_and_replicas(tmp_path):
 
 def test_default_public_host_prefers_explicit_env():
     host = default_public_host(
-        {"OSWORLD_FLEET_HOST": "custom-host"},
+        {"ENV_FLEET_HOST": "custom-host"},
         run_command=lambda _command: "NodeAddr=slurm-host",
     )
 
@@ -217,7 +216,10 @@ def test_default_public_host_falls_back_to_fqdn():
     assert host == "jwb0127.juwels"
 
 
-def test_env_server_config_writes_taskset_without_partition_keys(tmp_path):
+def test_env_server_config_injects_the_exact_serialized_status_path(
+    tmp_path,
+    environment_contract,
+):
     server = make_server_specs(
         host="node001",
         bind_host="0.0.0.0",
@@ -227,59 +229,62 @@ def test_env_server_config_writes_taskset_without_partition_keys(tmp_path):
         workers_per_server=2,
         replica_count=4,
         replica_offset=2,
-        name_prefix="osworld",
+        name_prefix="fixture",
         config_dir=tmp_path,
         log_dir=tmp_path,
         pool_status_root=tmp_path / "status",
     )[0]
-    args = SimpleNamespace(
-        task_base_path=tmp_path / "tasks",
-        max_tasks=5,
-        shuffle_seed=11,
-        max_steps=4,
-        run_root=tmp_path / "run",
-        env_id="rl",
-        rollout_timeout=3600.0,
-        env_max_retries=2,
-    )
-
-    write_env_server_config(
-        server,
-        args,
-        {
-            "harness": {
-                "max_steps": 4,
-                "desktop": {
-                    "desktop_pool_config": {
-                        "runtime_dir": "/tmp/osworld-runtime",
-                    },
-                },
-            }
-        },
-    )
+    write_env_server_config(server, environment_contract.session)
 
     with Path(server.config_path).open("rb") as file:
         config = tomllib.load(file)
     env = config["env"]
-    assert env["taskset"] == {
-        "id": "rl",
-        "base_path": str(tmp_path / "tasks"),
-        "max_tasks": 5,
-        "shuffle_seed": 11,
+    assert env["name"] == "fixture-0002"
+    assert env["serve"] == {
+        "address": "tcp://0.0.0.0:5200",
+        "pool": {"type": "static", "num_workers": 2},
     }
-    assert env["pool"] == {"type": "static", "num_workers": 2}
-    assert env["timeout"] == {"rollout": 3600.0}
-    assert env["retries"] == {"rollout": {"max_retries": 2}}
-    assert env["max_turns"] == 4
-    pool = env["harness"]["desktop"]["desktop_pool_config"]
+    agent = env["env"]["agent"]
+    assert env["env"]["taskset"] == environment_contract.session.taskset
+    assert agent["timeout"] == {"rollout": 600.0}
+    assert agent["retries"] == {"max_retries": 2}
+    assert agent["max_turns"] == 4
+    pool = agent["harness"]["runner"]["pool"]
     assert pool["status_dir"] == server.pool_status_dir
-    assert pool["runtime_dir"] == "/tmp/osworld-runtime"
+    assert pool["min_ready_sessions"] == environment_contract.session.min_ready_sessions
+    assert pool["node_local_path"] == "/runtime/node-local.json"
+    assert config["output_dir"] == str(environment_contract.session.output_dir)
 
 
-def test_toml_literal_renders_nested_inline_tables():
-    rendered = toml_literal({"config": {"taskset": {"base_path": "/tasks"}}})
+def test_accepted_contract_config_round_trips_through_toml(
+    tmp_path,
+    environment_contract,
+):
+    payload = environment_contract.as_metadata()
+    payload["session"]["taskset"]["dotted.key"] = {
+        'quoted"key': ["value", {"table.key": 3}]
+    }
+    contract = EnvironmentContract.from_metadata(payload)
+    server = make_server_specs(
+        host="node001",
+        bind_host="0.0.0.0",
+        base_port=5200,
+        node_rank=0,
+        servers_per_node=1,
+        workers_per_server=1,
+        replica_count=1,
+        replica_offset=0,
+        name_prefix="fixture",
+        config_dir=tmp_path,
+        log_dir=tmp_path,
+        pool_status_root=tmp_path / "status",
+    )[0]
 
-    assert rendered == '{ config = { taskset = { base_path = "/tasks" } } }'
+    write_env_server_config(server, contract.session)
+
+    with Path(server.config_path).open("rb") as file:
+        rendered = tomllib.load(file)
+    assert rendered["env"]["env"]["taskset"] == contract.session.taskset
 
 
 def test_scratch_helpers_default_to_project_scratch(monkeypatch):
@@ -302,19 +307,19 @@ def test_scratch_helpers_honor_runtime_overrides(tmp_path):
 def test_fleet_run_layout_rejects_non_absolute_environment_paths(tmp_path):
     env = {
         "SCRATCH": str(tmp_path / "scratch"),
-        "OSWORLD_FLEET_RUN_ID": "run-a",
-        "OSWORLD_RUN_BASE": "relative/run-base",
+        "ENV_FLEET_RUN_ID": "run-a",
+        "ENV_FLEET_RUN_BASE": "relative/run-base",
     }
 
-    with pytest.raises(ValueError, match="OSWORLD_RUN_BASE must be an absolute path"):
+    with pytest.raises(ValueError, match="ENV_FLEET_RUN_BASE must be an absolute path"):
         FleetRunLayout.from_env(env)
 
-    env["OSWORLD_RUN_BASE"] = str(tmp_path / "run-base")
-    env["OSWORLD_ENV_FLEET_REGISTRY"] = "${SCRATCH}/registry.json"
+    env["ENV_FLEET_RUN_BASE"] = str(tmp_path / "run-base")
+    env["ENV_FLEET_REGISTRY"] = "${SCRATCH}/registry.json"
 
     with pytest.raises(
         ValueError,
-        match="OSWORLD_ENV_FLEET_REGISTRY must be an absolute path",
+        match="ENV_FLEET_REGISTRY must be an absolute path",
     ):
         FleetRunLayout.from_env(env)
 
@@ -323,8 +328,8 @@ def test_runtime_env_file_rejects_non_absolute_path_overrides():
     with pytest.raises(ValueError, match="runtime env file path must be an absolute"):
         load_runtime_env_file(path="runtime.env")
 
-    with pytest.raises(ValueError, match="RL_RUNTIME_ENV_FILE must be an absolute"):
-        load_runtime_env_file(env={"RL_RUNTIME_ENV_FILE": "${SCRATCH}/runtime.env"})
+    with pytest.raises(ValueError, match="ENV_FLEET_RUNTIME_ENV_FILE must be an absolute"):
+        load_runtime_env_file(env={"ENV_FLEET_RUNTIME_ENV_FILE": "${SCRATCH}/runtime.env"})
 
 
 def test_runtime_env_file_loads_shell_style_assignments(tmp_path):
@@ -370,23 +375,23 @@ def test_an_already_exported_variable_beats_the_runtime_env_file(tmp_path):
 
     This loader runs before argparse, so it is what every environment-backed
     ``Opt`` reads.  Overwriting here silently discards
-    ``OSWORLD_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...``.
+    ``ENV_FLEET_BASE_PORT=5300 python -m desktop_fleet.supervise ...``.
     """
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "OSWORLD_FLEET_BASE_PORT=5400\nOSWORLD_FLEET_HOST=from-file\n", encoding="utf-8"
+        "ENV_FLEET_BASE_PORT=5400\nENV_FLEET_HOST=from-file\n", encoding="utf-8"
     )
-    env = {"OSWORLD_FLEET_BASE_PORT": "5300"}
+    env = {"ENV_FLEET_BASE_PORT": "5300"}
 
     assert load_runtime_env_file(env=env, path=env_file) == env_file
     assert env == {
-        "OSWORLD_FLEET_BASE_PORT": "5300",
-        "OSWORLD_FLEET_HOST": "from-file",
+        "ENV_FLEET_BASE_PORT": "5300",
+        "ENV_FLEET_HOST": "from-file",
     }
 
 
 def test_runtime_env_file_can_be_disabled():
-    env = {"RL_RUNTIME_ENV_FILE": ""}
+    env = {"ENV_FLEET_RUNTIME_ENV_FILE": ""}
 
     assert load_runtime_env_file(env=env) is None
 

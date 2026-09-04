@@ -19,7 +19,7 @@ from desktop_fleet.slurm import (
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
 def test_parse_squeue_and_cancel_guards():

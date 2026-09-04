@@ -81,17 +81,10 @@ wheels = [
 [[package]]
 name = "desktop"
 version = "0.1.0"
-source = { editable = "../" }
+source = { git = "https://github.com/p-doom/desktop.git?rev=47c08a7379c0fe3d7589298207cd2ff49182d645#47c08a7379c0fe3d7589298207cd2ff49182d645" }
 dependencies = [
     { name = "pillow" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "pillow", specifier = ">=10" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "desktop-fleet"
@@ -115,7 +108,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "desktop", editable = "../" },
+    { name = "desktop", git = "https://github.com/p-doom/desktop.git?rev=47c08a7379c0fe3d7589298207cd2ff49182d645" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyzmq", specifier = ">=26.0" },

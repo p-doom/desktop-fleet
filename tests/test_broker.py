@@ -18,6 +18,7 @@ import msgpack
 import pytest
 
 from desktop_fleet.broker import (
+    BACKEND_HEALTH_TIMEOUT_ERROR,
     NO_BACKEND_CAPACITY_TIMEOUT_ERROR,
     NO_HEALTHY_BACKENDS_ERROR,
     PENDING_QUEUE_FULL_ERROR,
@@ -38,7 +39,7 @@ from desktop_fleet.supervise import BROKER_MODULE, broker_command
 
 @pytest.fixture(autouse=True)
 def disable_runtime_env_file(monkeypatch):
-    monkeypatch.setenv("RL_RUNTIME_ENV_FILE", "")
+    monkeypatch.setenv("ENV_FLEET_RUNTIME_ENV_FILE", "")
 
 
 def test_supervisor_spawns_the_in_package_broker_entrypoint():
@@ -88,13 +89,19 @@ def test_broker_resolves_cross_node_backends_from_registry_gateway_metadata(tmp_
     assert gateway_bind_address({}) is None
 
 
-def test_broker_refuses_a_registry_that_declares_no_expected_server_count(tmp_path):
+def test_broker_refuses_a_registry_that_declares_no_expected_server_count(
+    tmp_path,
+    environment_metadata,
+):
     """A defaulted 0 made the quorum check `len(servers) >= 0`, always true."""
     registry_path = tmp_path / "registry.json"
     upsert_registry(
         path=registry_path,
         run_id="12345",
-        metadata={"gateway": {"bind_address": "tcp://0.0.0.0:5204"}},
+        metadata={
+            **environment_metadata,
+            "gateway": {"bind_address": "tcp://0.0.0.0:5204"},
+        },
         servers=make_server_specs(
             host="node001",
             bind_host="0.0.0.0",
@@ -330,6 +337,30 @@ def test_gateway_backend_health_probe_uses_msgpack_payload():
     assert backend.pending_health is False
     assert backend.healthy is True
     assert backend.last_error is None
+
+
+def test_gateway_fails_inflight_route_when_backend_health_times_out():
+    gateway = gateway_with_fake_sockets(request_ids=[b"backend-1"])
+    backend = gateway.backends[0]
+    backend.healthy = True
+    gateway.health_check_timeout = 1.0
+
+    run(gateway.forward_request(b"client-a", b"front-1", b"payload"))
+    backend.pending_health = True
+    backend.last_probe_at = time.monotonic() - 2.0
+
+    run(gateway.poll_backend_health())
+
+    frames = gateway.frontend.sent[-1]
+    response = msgpack.unpackb(frames[2], raw=False)
+    assert frames[:2] == [b"client-a", b"front-1"]
+    assert response == {
+        "success": False,
+        "error": f"{BACKEND_HEALTH_TIMEOUT_ERROR}: {backend.address}",
+    }
+    assert gateway.routes_by_frontend == {}
+    assert gateway.routes_by_backend == {}
+    assert backend.in_flight == 0
 
 
 def test_gateway_queues_request_when_all_live_backends_are_busy(tmp_path):

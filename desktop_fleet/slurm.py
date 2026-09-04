@@ -41,6 +41,28 @@ def slurm_metadata(env: Mapping[str, str]) -> dict[str, str]:
     return {key.lower(): value for key in keys if (value := env.get(key))}
 
 
+def slurm_memory_gb(env: Mapping[str, str]) -> int | None:
+    """This node's memory allocation, or ``None`` when Slurm did not cap it."""
+    mem_per_node = env.get("SLURM_MEM_PER_NODE")
+    if mem_per_node:
+        megabytes = int(mem_per_node)
+    else:
+        mem_per_cpu = env.get("SLURM_MEM_PER_CPU")
+        if not mem_per_cpu:
+            return None
+        cpus = env.get("SLURM_CPUS_ON_NODE") or env.get("SLURM_CPUS_PER_TASK")
+        if not cpus:
+            raise ValueError(
+                "SLURM_MEM_PER_CPU is set without SLURM_CPUS_ON_NODE or "
+                "SLURM_CPUS_PER_TASK"
+            )
+        megabytes = int(mem_per_cpu) * int(cpus)
+    if megabytes == 0:
+        # Slurm exports 0 for a whole-node memory request.
+        return None
+    return megabytes // 1024
+
+
 def slurm_node_addrs(env: Mapping[str, str]) -> list[str]:
     """Resolve Slurm node names to NodeAddr values when available."""
     nodelist = env.get("SLURM_JOB_NODELIST")
